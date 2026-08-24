@@ -1,0 +1,313 @@
+### =====================================================================
+### matreko-server M4 翻译代理与引擎管理 —— 接口联调测试（VS Code REST Client 版）
+### =====================================================================
+### 运行环境：VS Code + REST Client 插件（扩展 ID: humao.rest-client）
+### 使用方式：
+###   1. 先在 VS Code 扩展市场安装 "REST Client"
+###   2. 打开本文件，按 ### 编号顺序逐步执行（点请求上方的 "Send Request"）
+###   3. 每次执行后，把响应中的关键值手动填到顶部对应变量，再执行下一步
+### 服务地址：localhost:3000（.env 中 PORT 配置），如需改端口改 @host。
+### 注意：本服务翻译依赖外部引擎（Google / DeepL）。沙箱无外网时：
+###   - 连通性校验（建 Key）与真实翻译会失败（NETWORK），服务端按设计「放行并提示」，
+###     因此建 Key 仍返回 201（带 connectivityWarning），translate 仍返回 503。
+###   - 这是预期行为，非缺陷。接入真实 Key + 网络后即可正常翻译。
+### =====================================================================
+### 测试覆盖（对应 task.md T4-01 ~ T4-07）：
+###   T4-01 翻译 Provider 适配层（Google / DeepL） —— 通过建 Key 连通性校验间接验证
+###   T4-02 客户端翻译代理（/api/client/translate）
+###   T4-03 引擎双层选路 + 语种支持（无 Key 503 / 语言不支持 400）
+###   T4-04 语种清单维护（/engines/languages 列表 + 手动置状态）
+###   T4-05 超长消息分片（离线无法真翻，逻辑见 unit；此处给长文本用例）
+###   T4-06 翻译 API Key 管理（增/查/改/停用启用/掩码/连通性校验）
+###   T4-07 用量与风险提示（列表 engineAgg / riskHints / 单 Key 近 24h 用量）
+### =====================================================================
+### c6887cc2-74d7-4b86-8f64-58f6ee7d50ad:fx
+### aa1a5849-4f3f-4096-8271-506ca91503b2:fx
+### 5d29e55a-6a3d-4601-bc8d-0565c8dde870:fx
+ 
+ @deepLKey1 = c6887cc2-74d7-4b86-8f64-58f6ee7d50ad:fx
+ @deepLKey2 = aa1a5849-4f3f-4096-8271-506ca91503b2:fx
+ @deepLKey3 = 5d29e55a-6a3d-4601-bc8d-0565c8dde870:fx
+
+@host = http://localhost:3000
+@platformEmail = admin@platform.example
+@platformPassword = Admin12345
+
+# 主管邮箱与设备指纹，可按需修改（每次新建团队建议换一个邮箱避免冲突）
+@supervisorEmail = sup_m4_test@matreko.local
+@fingerprint = fp-m4-mac-001
+
+# ── 以下为动态变量，执行到对应步骤后手动回填 ──
+# 填第1.1步响应的 data.token
+@platformToken = dCO48WzGd6BaY1VM939DlmzDspZaHEcJ-jy0s4eK-fw
+# 填第2.1步响应的 data.team.id
+@teamId = cmt1amm420003uoodtpe2ygg1
+# 填第2.1步响应的 data.supervisor.id
+@supervisorId = cmt1amm430005uoodifeb9m23
+# 填第2.1步响应的 data.initialPassword（仅此一次返回，勿丢）
+@supervisorPassword = HiXMIGIIegDX
+# 填第3.1步响应的 data.token
+@supervisorToken = V_ku0CRn1ASS4x6OK8HRyi9cATFOjmue6XZtxr5uoTE
+# 填第4.1步响应的 data.licenseKey.id
+@licenseKeyId = cmt1n8hhn0001uo08pxdu4o9s
+# 填第4.1步响应的 data.plaintextCode（仅此一次返回）
+@licenseCode = MTRK-7S47-OZDE-HWF7-XENY
+# 填第5.1步响应的 data.accessToken
+@clientAccessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlfdktMejQ1amhBblk0SnBNM3kzMnpUdyIsImtleUlkIjoiY210MW44aGhuMDAwMXVvMDhweGR1NG85cyIsImRldmljZUZpbmdlcnByaW50SGFzaCI6IjZmOTBmYTZmZWRlNDI2YTAyMzdlMGFhNjRjZTFmNGNmODU4NzQxYTI0MDIxMDBmZTVhZDRiMzJkNWFhMjY2YmUiLCJqdGkiOiJzQWU5SlZTQ1lvcWxWNVF6dmcwbmhnIiwidG9rZW5fdHlwZSI6ImNsaWVudCIsImlhdCI6MTc4NzIzNzgyMCwiZXhwIjoxNzg3MjM4NzIwfQ.WMFWaCCjtLpzfr72IwbbGHJZKSNqhER0McahXNktYVY
+# 填第4.1步响应的 data.clientId（激活所得）
+@clientId = cli_ZQFaR02s67MWLyJ9rEeHhQ
+# 填第6.1步响应的 data.id（新建的翻译 Key）
+@translationKeyId = cmt1bku9g000iuoode6krlv9v
+
+### =====================================================================
+### 阶段 0：健康检查
+### =====================================================================
+
+### 0.1 查看 OpenAPI 文档（确认服务在线 + M4 路由已注册）
+GET {{host}}/api-docs.json
+
+### =====================================================================
+### 阶段 1：平台管理员登录
+### =====================================================================
+
+### 1.1 平台管理员登录 → 回填 @platformToken
+POST {{host}}/api/platform/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{platformEmail}}",
+  "password": "{{platformPassword}}"
+}
+
+### =====================================================================
+### 阶段 2：创建测试团队（M4 前置依赖：需要翻译配额）
+### =====================================================================
+
+### 2.1 创建团队（translationQuota 给大些）→ 回填 @teamId / @supervisorId / @supervisorPassword
+###     initialPassword 仅此一次返回，切勿丢失
+POST {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "name": "M4测试团队_翻译代理",
+  "supervisorEmail": "{{supervisorEmail}}",
+  "expiresAt": "2028-06-30T23:59:59+08:00",
+  "portQuota": 3,
+  "translationQuota": 1000000
+}
+
+### =====================================================================
+### 阶段 3：主管登录 + 生成密钥 + 客户端激活（拿 clientAccessToken）
+### =====================================================================
+
+### 3.1 主管登录 → 回填 @supervisorToken
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 4.1 生成密钥 → 回填 @licenseKeyId / @licenseCode
+POST {{host}}/api/supervisor/licenses
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "nickname": "客服M4-01",
+  "multiDeviceEnabled": false
+}
+
+### 5.1 客户端激活 → 回填 @clientAccessToken / @clientId
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprint}}",
+  "deviceLabel": "M4测试机-Mac"
+}
+
+### =====================================================================
+### 阶段 4：T4-02 / T4-03 客户端翻译代理
+### =====================================================================
+
+### 6.1 翻译（无配置任何 Key）→ 预期 503 TRANSLATION_SERVICE_UNAVAILABLE
+###     错误信息：未配置任何可用的翻译引擎 Key
+POST {{host}}/api/client/translate
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "text": "こんにちは、お名前は何ですか？",
+  //"sourceLang": "en",
+  "targetLang": "zh",
+  "direction": "IN"
+}
+
+### 6.2 翻译（目标语言不支持）→ 预期 400 LANGUAGE_UNSUPPORTED
+###     选路第一层：语言不在任一引擎支持清单中
+POST {{host}}/api/client/translate
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "text": "Hello",
+  "targetLang": "xx",
+  "direction": "IN"
+}
+
+### 6.3 翻译（超长文本分片，T4-05 用例，离线会 503 NETWORK，属预期）
+###     单条 ≤ ENGINE_MAX_CHARS(5000) 直翻；超出按句子边界分片(≤ CHUNK_SIZE 4500)逐片翻译
+POST {{host}}/api/client/translate
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "text": "This is a very long message. It will be split into chunks if it exceeds the limit. 这是一段很长的中文内容，用于验证超长消息的分片翻译逻辑是否按句子边界正确切分并逐片调用引擎后合并。",
+  //"sourceLang": "en",
+  "targetLang": "ja",
+  "direction": "IN"
+}
+
+### =====================================================================
+### 阶段 5：T4-06 翻译 API Key 管理（平台管理员专属）
+### =====================================================================
+
+### 7.1 Key 列表（初始应为空）→ 预期 200 + data.items=[]
+GET {{host}}/api/platform/translation-keys
+Authorization: Bearer {{platformToken}}
+
+### 7.2 新增 Google Key（沙箱无网 → 连通性校验 NETWORK 放行，返回 201 + connectivityWarning）
+###     → 回填 @translationKeyId
+###     响应含 maskedKey（掩码，永不返回明文）、connectivityWarning
+POST {{host}}/api/platform/translation-keys
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "engine": "GOOGLE",
+  "name": "M4-GOOGLE-测试",
+  "apiKey": "FAKE_GOOGLE_KEY_FOR_SANDBOX",
+  "quotaLimit": 500000
+}
+
+### 7.3 新增 DeepL Key（同 7.2，离线放行）
+POST {{host}}/api/platform/translation-keys
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "engine": "DEEPL",
+  "name": "M4-DEEPL-测试3",
+  "apiKey": "{{deepLKey3}}",
+  "quotaLimit": null
+}
+
+### 7.4 Key 列表（应含 2 条，含掩码 / 状态 / 引擎聚合 engineAgg / 风险提示 riskHints）
+###     engineAgg: 各引擎 Key 数 + 可用数 + 额度汇总
+###     riskHints: 无可用 Key / 额度将尽 / 近窗失败等提示
+GET {{host}}/api/platform/translation-keys
+Authorization: Bearer {{platformToken}}
+
+### 7.5 单个 Key 详情 → 预期 200 + 掩码字段
+GET {{host}}/api/platform/translation-keys/{{translationKeyId}}
+Authorization: Bearer {{platformToken}}
+
+### 7.6 修改 Key（名称 / 额度上限）→ 预期 200
+PUT {{host}}/api/platform/translation-keys/{{translationKeyId}}
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "name": "M4-GOOGLE-改名",
+  "quotaLimit": 800000
+}
+
+### 7.7 停用 Key（无删除，仅 DISABLED）→ 预期 200 + status=DISABLED
+POST {{host}}/api/platform/translation-keys/{{translationKeyId}}/status
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "status": "DISABLED"
+}
+
+### 7.8 重新启用 Key → 预期 200 + status=ACTIVE
+POST {{host}}/api/platform/translation-keys/{{translationKeyId}}/status
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "status": "ACTIVE"
+}
+
+### 7.9 单 Key 近 24h 用量（T4-07）→ 预期 200 + usedChars / usageCount / failures 等
+GET {{host}}/api/platform/translation-keys/{{translationKeyId}}/usage
+Authorization: Bearer {{platformToken}}
+
+### 7.10 字段校验：缺 apiKey → 预期 400
+POST {{host}}/api/platform/translation-keys
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "engine": "GOOGLE",
+  "name": "非法Key"
+}
+
+### =====================================================================
+### 阶段 6：T4-04 语种清单维护
+### =====================================================================
+
+### 8.1 语种支持列表（启动已预置，GOOGLE 131 / DEEPL 33）→ 预期 200 + 数组
+GET {{host}}/api/platform/engines/languages
+Authorization: Bearer {{platformToken}}
+
+### 8.2 手动维护某语言支持状态（如标记 DeepL 不支持某小语种）→ 预期 200
+###     status=SUPPORTED | UNSUPPORTED；将影响 T4-03 选路第一层
+POST {{host}}/api/platform/engines/languages
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "engine": "DEEPL",
+  "languageCode": "zh",
+  "status": "SUPPORTED"
+}
+
+### 8.3 再次查看列表确认 8.2 生效（DeepL.zh 状态变更）
+GET {{host}}/api/platform/engines/languages
+Authorization: Bearer {{platformToken}}
+
+### =====================================================================
+### 阶段 7：T4-02 回归（已配置 Key 后，离线仍 503 NETWORK，属预期）
+### =====================================================================
+
+### 9.1 已配置 Key 但沙箱无网 → 预期 503 TRANSLATION_SERVICE_UNAVAILABLE（NETWORK）
+###     接入真实 Key + 网络后此处应返回 200 + translatedText
+POST {{host}}/api/client/translate
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "text": "Good morning",
+  "sourceLang": "en",
+  "targetLang": "zh",
+  "direction": "IN"
+}
+
+### API Key 认证即可拿到当前计费周期的字符用量
+### Free 版（api-free.deepl.com）
+GET https://api-free.deepl.com/v2/usage
+Authorization: DeepL-Auth-Key {{deepLKey1}}
+
+### Pro 版（api.deepl.com）
+GET https://api.deepl.com/v2/usage
+Authorization: DeepL-Auth-Key {{deepLKey1}}

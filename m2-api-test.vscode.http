@@ -1,0 +1,629 @@
+### =====================================================================
+### matreko-server M2 团队与配额管理 —— 接口联调测试（VS Code REST Client 版）
+### =====================================================================
+### 运行环境：VS Code + REST Client 插件（扩展 ID: humao.rest-client）
+### 使用方式：
+###   1. 先在 VS Code 扩展市场安装 "REST Client"
+###   2. 打开本文件，按 ### 编号顺序逐步执行（点请求上方的 "Send Request"）
+###   3. 每次执行后，把响应中的关键值手动填到顶部对应变量，再执行下一步
+### 服务地址：localhost:3000（.env 中 PORT 配置），如需改端口改 @host。
+### =====================================================================
+### 测试覆盖：
+###   T2-02 团队列表与查看（AC2）—— 时间统一 Asia/Shanghai、端口占用、翻译用量、主管账号 id 与名称
+###   T2-03 配额与到期时刻修改（AC3/AC4/AC5/AC10～AC13）
+###     - 延长到期：创建时刻与累计用量不变（AC4）
+###     - 改到未来恢复可用（AC5）
+###     - 改到过去 = 立即到期，需 confirm（AC11）
+###     - 配额非负整数校验（AC13）
+###     - 无变化检测（diff）
+###     - 部分更新（只传一个字段）
+###   T2-04 团队禁用（AC8～AC9）
+###     - 提交前返回影响范围（AC8）
+###     - 禁用后主管登录被拒（AC9）
+###     - 幂等：重复禁用返回 alreadyDisabled
+###   T2-04b 团队启用（P0-B-10 AC17）
+###     - 禁用后恢复启用：主管重新可登录、客户端凭据恢复
+###     - 累计用量延续不清零（AC17）
+###     - 幂等：重复启用返回 alreadyEnabled
+###     - 到期时刻已过的团队启用后仍按到期处理（expired=true，需改到期到未来）
+###   主管密码重置（P0-A-19 AC13）
+###     - 密码由后端随机生成（与创建团队时同样方式），请求体只需 accountId
+###     - 重置后该主管所有已登录会话立即失效（旧 Token 401）
+###     - 返回临时密码（仅此一次），用新密码可登录
+### =====================================================================
+
+@host = http://localhost:3000
+@platformEmail = admin@matreko.local
+@platformPassword = Admin12345
+
+# 主管邮箱与设备指纹，可按需修改
+@supervisorEmail = sup_m2_test@matreko.local
+@fingerprintA = fp-m2-mac-001
+
+# ── 以下为动态变量，执行到对应步骤后手动回填 ──
+# 填第1.1步响应的 data.token
+@platformToken = Uu_YziIIwsJyYzW3jyOZooKPpJObSRHHy1e3MOhue7s
+# 填第2.1步响应的 data.supervisor.id
+@supervisorId = cmszvqmjz0005uozm6f5g88ai
+# 填第2.1步响应的 data.initialPassword（仅此一次返回，勿丢）
+@supervisorPassword = Kd7v6Fp4EFV7
+# 填第2.1步响应的 data.team.id
+@teamId = cmszvqmjy0003uozmy1u05ykz
+# 填第3.1步响应的 data.token
+@supervisorToken = nVhRPnzGoNpfLeijv10vEyY8yc1W7fNAReHhNnePiT4
+# 填第9.5.1步响应的 data.token（重置密码测试用，即将被作废）
+@supervisorOldToken =
+# 填第4.1步响应的 data.licenseKey.id
+@licenseKeyId = 
+# 填第4.1步响应的 data.plaintextCode（仅此一次返回）
+@licenseCode = 
+# 填第5.1步响应的 data.accessToken
+@clientAccessToken = 
+# 填第5.1步响应的 data.device.id
+@bindingAId = 
+
+# 第二个团队（用于列表测试）
+@supervisor2Email = sup_m2_test2@matreko.local
+@team2Id = cmszvrdml0007uozm49wgn27v
+@supervisor2Password = TaqbBPbMmG8r
+
+### =====================================================================
+### 阶段 0：健康检查
+### =====================================================================
+
+### 0.1 查看 OpenAPI 文档（确认服务在线 + M2 路由已注册）
+GET {{host}}/api-docs.json
+
+### =====================================================================
+### 阶段 1：平台管理员登录
+### =====================================================================
+
+### 1.1 平台管理员登录 → 回填 @platformToken
+POST {{host}}/api/platform/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{platformEmail}}",
+  "password": "{{platformPassword}}"
+}
+
+### =====================================================================
+### 阶段 2：创建测试团队（T2-01 复用，M2 前置依赖）
+### =====================================================================
+
+### 2.1 创建团队 A → 回填 @supervisorId / @supervisorPassword / @teamId
+###     initialPassword 仅此一次返回，切勿丢失
+POST {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "name": "M2测试团队A_华东一组",
+  "supervisorEmail": "{{supervisorEmail}}",
+  "expiresAt": "2027-06-30T23:59:59+08:00",
+  "portQuota": 10,
+  "translationQuota": 1500000
+}
+
+### 2.2 创建团队 B（第二个团队，用于列表测试）→ 回填 @team2Id / @supervisor2Password
+POST {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "name": "M2测试团队B_华南二组",
+  "supervisorEmail": "{{supervisor2Email}}",
+  "expiresAt": "2028-01-01T00:00:00+08:00",
+  "portQuota": 20,
+  "translationQuota": 3000000
+}
+
+### =====================================================================
+### 阶段 3：主管登录 + 生成密钥 + 客户端激活（构造有数据的场景）
+### =====================================================================
+
+### 3.1 主管 A 登录 → 回填 @supervisorToken
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 3.2 生成密钥 → 回填 @licenseKeyId / @licenseCode
+POST {{host}}/api/supervisor/licenses
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "nickname": "客服M2-01",
+  "multiDeviceEnabled": false
+}
+
+### 3.3 客户端激活（构造活跃密钥 + 设备绑定）→ 回填 @clientAccessToken / @bindingAId
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprintA}}",
+  "deviceLabel": "M2测试机-Mac"
+}
+
+### =====================================================================
+### 阶段 4：T2-02 团队列表与查看（AC2）
+### =====================================================================
+
+### 4.1 团队列表 → 验证：多个团队、状态/创建/到期/端口占用/翻译用量、
+###     每个团队含 supervisor { accountId, email, status }（主管账号 id 与名称）、timezone=Asia/Shanghai
+GET {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+
+### 4.2 鉴权拦截：无 Token → 预期 401
+GET {{host}}/api/platform/teams
+
+### 4.3 鉴权拦截：主管 Token 调用平台接口 → 预期 403（角色不匹配）
+GET {{host}}/api/platform/teams
+Authorization: Bearer {{supervisorToken}}
+
+### =====================================================================
+### 阶段 5：T2-03 配额与到期时刻修改（AC3/AC4/AC5/AC10～AC13）
+### =====================================================================
+
+### 5.1 修改端口配额（10 → 15）→ 验证：changes.portQuota { from: 10, to: 15 }
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": 15
+}
+
+### 5.2 修改翻译配额（150万 → 200万）→ 验证：changes.translationQuota
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "translationQuota": 2000000
+}
+
+### 5.3 同时修改多个字段（端口配额 + 翻译配额）→ 验证：changes 含两个字段
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": 12,
+  "translationQuota": 1800000
+}
+
+### 5.4 延长到期时刻（AC4：创建时刻与累计用量不变）→ 验证：expiresChanged=true, createdAt 不变
+###     原到期 2027-06-30 → 延到 2027-12-31
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "expiresAt": "2027-12-31T23:59:59+08:00"
+}
+
+### 5.5 无变化检测（传相同值）→ 验证：noChange=true
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": 12,
+  "translationQuota": 1800000
+}
+
+### 5.6 配额校验：负数 → 预期 400（AC13）
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": -1
+}
+
+### 5.7 配额校验：非整数 → 预期 400（AC13）
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "translationQuota": 100.5
+}
+
+### 5.8 空请求体（不传任何可修改字段）→ 预期 400（refine：至少需修改一项）
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 5.9 到期时刻格式校验：非法格式 → 预期 400
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "expiresAt": "2027/12/31 23:59:59"
+}
+
+### 5.10 AC11：改到期到过去（不确认）→ 预期 409 STATUS_CHANGED + impact { activeKeys, heldPorts }
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "expiresAt": "2020-01-01T00:00:00+08:00"
+}
+
+### 5.11 AC11 确认后：改到期到过去（confirm=true）→ 预期 200 + willExpireImmediately=true
+###      注意：此操作会立即使团队到期，后续主管登录将被拒
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "expiresAt": "2020-01-01T00:00:00+08:00",
+  "confirm": true
+}
+
+### 5.12 AC5：改到期到未来恢复可用 → 预期 200 + expiresChanged=true + willExpireImmediately=false
+###      用量延续（translationUsed 不清零）
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "expiresAt": "2028-06-30T23:59:59+08:00"
+}
+
+### 5.13 验证恢复：团队列表中该团队状态应恢复为 ACTIVE
+GET {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+
+### 5.14 不存在的团队 → 预期 404
+PUT {{host}}/api/platform/teams/nonexistent-team-id/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": 20
+}
+
+### =====================================================================
+### 阶段 6：T2-04 团队禁用（AC8～AC9）
+### =====================================================================
+
+### 6.1 AC8：禁用团队（不确认）→ 预期 409 STATUS_CHANGED + impact { activeKeys, heldPorts }
+POST {{host}}/api/platform/teams/{{teamId}}/disable
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "confirm": false
+}
+
+### 6.2 AC8 确认后：禁用团队（confirm=true）→ 预期 200 + impact
+###     禁用后全团队凭据按鉴权链路拒绝（≤60s 感知）
+POST {{host}}/api/platform/teams/{{teamId}}/disable
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 6.3 幂等：重复禁用 → 预期 200 + alreadyDisabled=true + impact
+POST {{host}}/api/platform/teams/{{teamId}}/disable
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 6.4 AC9 验证：禁用后主管登录被拒 → 预期 403 TEAM_DISABLED
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 6.5 AC9 验证：禁用后客户端凭据失效 → 预期 403
+###     （需等缓存失效 ≤60s；如立即返回 200 可稍等重试）
+GET {{host}}/api/client/me
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+
+### 6.6 验证：团队列表中该团队状态应为 DISABLED（数据保留可查）
+GET {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+
+### 6.7 禁用不存在的团队 → 预期 404
+POST {{host}}/api/platform/teams/nonexistent-team-id/disable
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 6.8 鉴权拦截：无 Token 禁用 → 预期 401
+POST {{host}}/api/platform/teams/{{teamId}}/disable
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 6.9 鉴权拦截：主管 Token 调用平台接口 → 预期 403
+###     （需先用团队 B 的主管登录获取 token，此处用已失效的团队 A 主管 token 测试）
+###     如需验证，请用团队 B 主管登录后替换 token
+POST {{host}}/api/platform/teams/{{team2Id}}/disable
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### =====================================================================
+### 阶段 7：T2-04b 团队启用（P0-B-10 AC17）
+### =====================================================================
+
+### 7.1 启用已禁用的团队 → 预期 200 + alreadyEnabled=false + team.status=ACTIVE
+###     累计用量延续原值继续累加，不清零、不重置（AC17）
+POST {{host}}/api/platform/teams/{{teamId}}/enable
+Authorization: Bearer {{platformToken}}
+
+### 7.2 幂等：重复启用 → 预期 200 + alreadyEnabled=true
+POST {{host}}/api/platform/teams/{{teamId}}/enable
+Authorization: Bearer {{platformToken}}
+
+### 7.3 恢复验证：主管重新登录 → 预期 200（缓存失效后 ≤60s）
+###     回填 @supervisorToken
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 7.4 恢复验证：客户端凭据重新生效 → 预期 200（缓存失效后 ≤60s）
+###     如立即返回 403 可等待 30-60s 后重试
+GET {{host}}/api/client/me
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+
+### 7.5 验证：团队列表中该团队状态应为 ACTIVE
+GET {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+
+### 7.6 启用不存在的团队 → 预期 404
+POST {{host}}/api/platform/teams/nonexistent-team-id/enable
+Authorization: Bearer {{platformToken}}
+
+### 7.7 鉴权拦截：无 Token 启用 → 预期 401
+POST {{host}}/api/platform/teams/{{teamId}}/enable
+
+### 7.8 鉴权拦截：主管 Token 调用平台接口 → 预期 403
+POST {{host}}/api/platform/teams/{{teamId}}/enable
+Authorization: Bearer {{supervisorToken}}
+
+### =====================================================================
+### 阶段 8：禁用+过期叠加场景（enable 不改 expiresAt）
+### =====================================================================
+
+### 8.1 禁用团队 A（confirm）→ 预期 200
+POST {{host}}/api/platform/teams/{{teamId}}/disable
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 8.2 改到期到过去（confirm）→ 预期 200（status=DISABLED 且已过期）
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "expiresAt": "2020-01-01T00:00:00+08:00",
+  "confirm": true
+}
+
+### 8.3 启用团队 A → 预期 200 + status=ACTIVE + expired=true
+###     验证：启用只恢复 status，到期仍按 expiresAt 判定（需另行改到期到未来）
+POST {{host}}/api/platform/teams/{{teamId}}/enable
+Authorization: Bearer {{platformToken}}
+
+### 8.4 改到期到未来（AC5）→ 预期 200，团队真正恢复可用
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "expiresAt": "2029-01-01T00:00:00+08:00"
+}
+
+### 8.5 主管登录验证完全恢复 → 预期 200，回填 @supervisorToken
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### =====================================================================
+### 阶段 9：T2-03 对团队 B 的配额修改（独立于团队 A 的状态）
+### =====================================================================
+
+### 9.1 修改团队 B 的端口配额 → 预期 200
+PUT {{host}}/api/platform/teams/{{team2Id}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": 25
+}
+
+### 9.2 团队 B 列表验证（确认修改生效）
+GET {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+
+### =====================================================================
+### 阶段 9.5：主管密码重置（P0-A-19 AC13）
+### 密码由后端随机生成（与创建团队时同样方式），重置后该主管所有已登录会话立即失效
+### =====================================================================
+
+### 9.5.1 主管用当前密码登录（获取一个即将被作废的会话）
+###     回填 @supervisorOldToken = 响应 data.token
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 9.5.2 平台管理员重置主管密码 → 预期 200 + data.temporaryPassword
+###     密码由后端生成，请求体只需 accountId
+###     回填 @supervisorPassword = 响应 data.temporaryPassword（供后续步骤用）
+POST {{host}}/api/platform/auth/reset-password
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "accountId": "{{supervisorId}}"
+}
+
+### 9.5.3 旧会话立即失效：用 9.5.1 的旧 Token 调用接口 → 预期 401
+POST {{host}}/api/supervisor/auth/logout
+Authorization: Bearer {{supervisorOldToken}}
+
+### 9.5.4 新密码登录 → 预期 200
+###     回填 @supervisorToken = 响应 data.token（供阶段 10 登出用）
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 9.5.5 异常：重置目标为主管以外的账号（平台管理员自身）→ 预期 400
+###     把 accountId 换成平台管理员账号 id（登录响应 data.account.id）
+POST {{host}}/api/platform/auth/reset-password
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "accountId": "cmsyfm2ko0000uozumgfnt74o"
+}
+
+### 9.5.6 异常：账号不存在 → 预期 404
+POST {{host}}/api/platform/auth/reset-password
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "accountId": "nonexistent-account-id"
+}
+
+### =====================================================================
+### 阶段 10：登出
+### =====================================================================
+
+### 10.1 主管登出
+POST {{host}}/api/supervisor/auth/logout
+Authorization: Bearer {{supervisorToken}}
+
+### 10.2 平台管理员登出
+POST {{host}}/api/platform/auth/logout
+Authorization: Bearer {{platformToken}}
+
+### =====================================================================
+### 附录：边界与异常场景速查
+### =====================================================================
+### 以下请求可独立执行，用于快速验证边界行为
+### =====================================================================
+
+### A.1 端口配额=0（合法值，下限）→ 预期 200
+# PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+# Authorization: Bearer {{platformToken}}
+# Content-Type: application/json
+#
+# {
+#   "portQuota": 0
+# }
+
+### A.2 翻译配额=0（合法值，下限）→ 预期 200
+# PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+# Authorization: Bearer {{platformToken}}
+# Content-Type: application/json
+#
+# {
+#   "translationQuota": 0
+# }
+
+### A.3 expiresAt 带偏移量格式（合法 ISO 8601 with offset）→ 预期 200
+# PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+# Authorization: Bearer {{platformToken}}
+# Content-Type: application/json
+#
+# {
+#   "expiresAt": "2027-12-31T23:59:59+08:00"
+# }
+
+### A.4 expiresAt UTC 格式（Z 后缀）→ 预期 200
+# PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+# Authorization: Bearer {{platformToken}}
+# Content-Type: application/json
+#
+# {
+#   "expiresAt": "2027-12-31T15:59:59Z"
+# }
+
+### A.5 端口配额超大数（int 上限附近）→ 预期 200
+# PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+# Authorization: Bearer {{platformToken}}
+# Content-Type: application/json
+#
+# {
+#   "portQuota": 2147483647
+# }
+
+### A.6 翻译配额超大数 → 预期 200
+# PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+# Authorization: Bearer {{platformToken}}
+# Content-Type: application/json
+#
+# {
+#   "translationQuota": 999999999
+# }
+
+### A.7 禁用后再改配额（团队已 DISABLED）→ 预期 200（配额可改，状态不变）
+# PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+# Authorization: Bearer {{platformToken}}
+# Content-Type: application/json
+#
+# {
+#   "portQuota": 100
+# }
+
+### A.8 禁用团队后列表仍可见（数据保留可查，AC9）
+# GET {{host}}/api/platform/teams
+# Authorization: Bearer {{platformToken}}

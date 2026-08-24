@@ -1,0 +1,181 @@
+### =====================================================================
+### matreko-server M5 用量计量与配额裁决 —— 接口联调测试（VS Code REST Client 版）
+### =====================================================================
+### 运行环境：VS Code + REST Client 插件（扩展 ID: humao.rest-client）
+### 使用方式：
+###   1. 安装 "REST Client" 插件
+###   2. 按 ### 编号顺序逐步执行（点请求上方 "Send Request"）
+###   3. 把响应关键值手动填到顶部对应变量，再执行下一步
+### 服务地址：localhost:3000（.env 中 PORT 配置），改端口改 @host。
+### 本服务翻译依赖外部引擎。沙箱无外网时：
+###   - 翻译接口返回 503（NETWORK），不落 usage 日志；
+###   - 因此 /translation-usage、/accounts 仍可 200 返回（聚合为空、剩余=配额）；
+###   - 单 Key 用量里的 providerUsage（DeepL 月度真实额度）需真实 Key + 网络才会非空。
+### =====================================================================
+### 测试覆盖（对应 task.md T5-03 / T5-04）：
+###   T5-04 主管侧用量查询：
+###     - GET /api/supervisor/accounts              IM 账号列表（在线/离线汇总）
+###     - GET /api/supervisor/translation-usage     团队用量+按密钥分布+按引擎Key分布+24h
+###   T5-03 KeyDailyUsage 每小时聚合（cron `0 * * * *`）：
+###     - 通过 /api/supervisor/translation-usage 的 usage24h 间接验证聚合结果
+###   DeepL getUsage 适配器（内部方法，经单 Key 用量接口暴露）：
+###     - GET /api/platform/translation-keys/:id/usage  → 响应含 providerUsage
+### =====================================================================
+
+ @deepLKey1 = c6887cc2-74d7-4b86-8f64-58f6ee7d50ad:fx
+ @deepLKey2 = aa1a5849-4f3f-4096-8271-506ca91503b2:fx
+ @deepLKey3 = 5d29e55a-6a3d-4601-bc8d-0565c8dde870:fx
+
+@host = http://localhost:3000
+@platformEmail = admin@matreko.local
+@platformPassword = Admin12345
+
+# 主管邮箱与设备指纹，可按需修改（每次新建团队建议换一个邮箱避免冲突）
+@supervisorEmail = sup_m5_test@matreko.local
+@fingerprint = fp-m5-mac-001
+
+# ── 以下为动态变量，执行到对应步骤后手动回填 ──
+@platformToken = aYMH27qEStk1tpfoas4WSItVZDFGNG3shKTKI7KjSRo
+@teamId = cmt2mqhy70005uo3qtuwzre4v
+@supervisorId = cmt2mqhy80007uo3qrwb6upap
+@supervisorPassword = MaLzSlwf8Vh7
+@supervisorToken = NvRj7z8qpcq3aB93SkjaQs4VPJHlKH_qvm7BaLciPrk
+@licenseKeyId = cmt2mrbwj000duo3q8brcmxku
+@licenseCode = MTRK-TK6Y-J6XR-Q73E-4PYV
+@clientAccessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlfSHlQRzhIdFZiNkotbTZyVDNDelp4dyIsImtleUlkIjoiY210Mm1yYndqMDAwZHVvM3E4YnJjbXhrdSIsImRldmljZUZpbmdlcnByaW50SGFzaCI6IjgzY2JhNmNmNzVjZGU3ZTI2NDA3NDQ0OGI4YmIwOWEyNTAzM2VlN2Q5ODZhYzdkNWI1ZGE1Y2QzNTcwMmE5ZjAiLCJqdGkiOiJzZGtsTTg0UG5nYm8xeGJOWmViNXdnIiwidG9rZW5fdHlwZSI6ImNsaWVudCIsImlhdCI6MTc4NzI5NzQ4MSwiZXhwIjoxNzg3Mjk4MzgxfQ.OwBm8vkznVeW7cnq7hTN6IXbOVIJyqZCZh2rczCw-Og
+@clientId = cli_HyPG8HtVb6J-m6rT3CzZxw
+@translationKeyId = cmt1bku9g000iuoode6krlv9v
+
+### =====================================================================
+### 阶段 0：健康检查（确认 M5 路由已注册）
+### =====================================================================
+
+### 0.1 查看 OpenAPI 文档（确认 /api/supervisor/accounts、/translation-usage 已存在）
+GET {{host}}/api-docs.json
+
+### =====================================================================
+### 阶段 1：平台管理员登录
+### =====================================================================
+
+### 1.1 平台管理员登录 → 回填 @platformToken
+POST {{host}}/api/platform/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{platformEmail}}",
+  "password": "{{platformPassword}}"
+}
+
+### =====================================================================
+### 阶段 2：创建测试团队（M5 前置：需要翻译配额与主管账号）
+### =====================================================================
+
+### 2.1 创建团队（translationQuota 给大些）→ 回填 @teamId / @supervisorId / @supervisorPassword
+POST {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "name": "M5测试团队_用量计量",
+  "supervisorEmail": "{{supervisorEmail}}",
+  "expiresAt": "2028-06-30T23:59:59+08:00",
+  "portQuota": 3,
+  "translationQuota": 1000000
+}
+
+### =====================================================================
+### 阶段 3：主管登录 + 生成密钥 + 客户端激活（拿到 team-scoped 主管令牌）
+### =====================================================================
+
+### 3.1 主管登录 → 回填 @supervisorToken
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 4.1 生成密钥 → 回填 @licenseKeyId / @licenseCode
+POST {{host}}/api/supervisor/licenses
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "nickname": "客服M5-01",
+  "multiDeviceEnabled": false
+}
+
+### 5.1 客户端激活 → 回填 @clientAccessToken / @clientId
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprint}}",
+  "deviceLabel": "M5测试机-Mac"
+}
+
+### =====================================================================
+### 阶段 4：T5-04 主管侧用量查询（M5 核心新增接口）
+### =====================================================================
+
+### 6.1 IM 账号列表（P0-B-10 AC1）→ 预期 200
+###     初始无账号：items=[]，summary={ online:0, offline:0, total:0 }
+###     接入真实 IM 端口并占用后，会列出 channel/accountId/status/online 等
+GET {{host}}/api/supervisor/accounts
+Authorization: Bearer {{supervisorToken}}
+
+### 6.2 翻译用量汇总（P0-B-10 AC4/AC8 / P1-B-16）→ 预期 200
+###     返回：team（累计已用/配额/剩余/是否耗尽）、usage24h、perLicenseKey、perEngineKey
+###     沙箱无网：translationUsed=0、remaining=translationQuota、isExhausted=false
+###     配额耗尽时额外返回 exhaustedMessage 阻断说明
+GET {{host}}/api/supervisor/translation-usage
+Authorization: Bearer {{supervisorToken}}
+
+### 6.3 未授权访问（缺 token）→ 预期 401 Unauthorized
+GET {{host}}/api/supervisor/translation-usage
+
+### 6.4 越权访问（用平台管理员 token 代替主管 token）→ 预期 403 Forbidden
+###     requireBackofficeAuth 仅放行 SUPERVISOR，平台管理员不在白名单
+GET {{host}}/api/supervisor/translation-usage
+Authorization: Bearer {{platformToken}}
+
+### =====================================================================
+### 阶段 5：DeepL getUsage 适配器冒烟（经单 Key 用量接口暴露 providerUsage）
+### =====================================================================
+
+### 7.1 新增 DeepL Key（沙箱无网 → 连通性校验 NETWORK 放行，返回 201 + connectivityWarning）
+###     → 回填 @translationKeyId
+POST {{host}}/api/platform/translation-keys
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "engine": "DEEPL",
+  "name": "M5-DEEPL-测试",
+  "apiKey": "{{deepLKey3}}",
+  "quotaLimit": null
+}
+
+### 7.2 单 Key 近 24h 用量 + 引擎侧真实额度（T4-07 + getUsage 适配）→ 预期 200
+###     providerUsage 字段：{ characterCount, characterLimit, remaining, fetchedAt }
+###     沙箱无网：DeepL /v2/usage 调不通 → providerUsage=null（查询失败不阻断）
+###     真实 Key + 网络：返回 DeepL 当月真实剩余字符（与自管 quotaUsed 是两套数字，前端需分开标注）
+GET {{host}}/api/platform/translation-keys/{{translationKeyId}}/usage
+Authorization: Bearer {{platformToken}}
+
+### =====================================================================
+### 阶段 6：T5-03 每小时聚合任务验证（可选说明）
+### =====================================================================
+### KeyDailyUsage 聚合由 server.ts 的 cron `0 * * * *` 自动执行（aggregateKeyDailyUsage）。
+### 冒烟方式：
+###   1) 让翻译成功落日志（需真实 Key + 网络，translate 返回 200 才会 meter 记账）；
+###   2) 手动触发：在服务器进程内调用 usageService.aggregateKeyDailyUsage() 或等整点 cron；
+###   3) 查库：SELECT * FROM key_daily_usage; 应出现按 (keyId, date) 聚合的 chars/calls。
+### 因沙箱无网，本环境无法产生成功用量日志，聚合任务仅做代码/迁移层面的存在性验证。
+
+### 补充：直接探测 DeepL 用量端点（确认 getUsage 目标接口可达性）
+### Free 版
+GET https://api-free.deepl.com/v2/usage
+Authorization: DeepL-Auth-Key {{deepLKey1}}

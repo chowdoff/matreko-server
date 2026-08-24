@@ -1,0 +1,282 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────── 枚举 ───────────────────────────────
+
+/// 团队状态（只能禁用，不能删除，P0-S-11）
+enum TeamStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 后台账号角色（P0-A-19：平台管理员全系统唯一，主管每团队唯一）
+enum AdminRole {
+  PLATFORM
+  SUPERVISOR
+}
+
+enum AccountStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 密钥状态（一密钥 = 一客服，P0-B-09）
+enum LicenseStatus {
+  UNUSED
+  ACTIVE
+  DISABLED
+}
+
+/// 端口租约状态（回收 = 置 RELEASED，不物理删除，P0-C-20）
+enum LeaseStatus {
+  HELD
+  RELEASED
+}
+
+enum TranslationEngine {
+  GOOGLE
+  DEEPL
+}
+
+enum TranslationKeyStatus {
+  ACTIVE
+  EXHAUSTED
+  INVALID
+  DISABLED
+}
+
+enum LangSupportStatus {
+  SUPPORTED
+  UNSUPPORTED
+}
+
+/// 凭据撤销原因（续期替换 / 主动吊销）
+enum RevokeReason {
+  RENEWED
+  REVOKED
+}
+
+enum ActorType {
+  CLIENT
+  SUPERVISOR
+  PLATFORM
+  SYSTEM
+}
+
+// ─────────────────────────────── 模型 ───────────────────────────────
+
+/// 团队（createdAt 不可修改；expiresAt 秒级精确，管理员可改）
+model Team {
+  id               String     @id @default(cuid())
+  name             String
+  createdAt        DateTime   @default(now())
+  expiresAt        DateTime
+  portQuota        Int
+  translationQuota Int        @default(1500000)
+  translationUsed  Int        @default(0) // 冗余计数，真相源为 TranslationUsageLog
+  status           TeamStatus @default(ACTIVE)
+
+  adminAccounts   AdminAccount[]
+  licenseKeys     LicenseKey[]
+  portLeases      PortLease[]
+  translationLogs TranslationUsageLog[]
+
+  @@map("teams")
+}
+
+/// 后台账号（仅禁用不删除；PLATFORM 全系统唯一）
+model AdminAccount {
+  id               String        @id @default(cuid())
+  role             AdminRole
+  email            String        @unique
+  passwordHash     String // bcrypt cost=12，不可还原（P0-A-19 AC16）
+  teamId           String?
+  team             Team?         @relation(fields: [teamId], references: [id])
+  status           AccountStatus @default(ACTIVE)
+  failedLoginCount Int           @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime      @default(now())
+
+  sessions BackofficeSession[]
+
+  @@map("admin_accounts")
+}
+
+/// 密钥（code 存 AES-256-GCM 密文，需展示时解密；不能删除只能禁用）
+model LicenseKey {
+  id                 String        @id @default(cuid())
+  teamId             String
+  team               Team          @relation(fields: [teamId], references: [id])
+  nickname           String        // 密钥昵称，主管可辨识的自定义名称
+  code               String? // AES-256-GCM 密文（iv.ct.tag base64 拼接）
+  status             LicenseStatus @default(UNUSED)
+  multiDeviceEnabled Boolean       @default(false)
+  deviceLimit        Int           @default(5) // 多开设备上限，恒为 5
+  createdAt          DateTime      @default(now())
+
+  deviceBindings    DeviceBinding[]
+  clientCredentials ClientCredential[]
+  portLeases        PortLease[]
+  translationLogs   TranslationUsageLog[]
+
+  @@map("license_keys")
+}
+
+/// 设备绑定（(keyId, fingerprintHash) 唯一；解绑即删除记录）
+model DeviceBinding {
+  id              String     @id @default(cuid())
+  keyId           String
+  licenseKey      LicenseKey @relation(fields: [keyId], references: [id], onDelete: Cascade)
+  fingerprintHash String // SHA-256(fingerprint + keyId)
+  deviceLabel     String?
+  boundAt         DateTime   @default(now())
+
+  @@unique([keyId, fingerprintHash])
+  @@map("device_bindings")
+}
+
+/// 客户端凭据（每个激活成功的设备一条；refresh token 旋转式替换）
+model ClientCredential {
+  id                    String     @id @default(cuid())
+  keyId                 String
+  licenseKey            LicenseKey @relation(fields: [keyId], references: [id], onDelete: Cascade)
+  deviceFingerprintHash String
+  clientId              String     @unique // 限流维度 key
+  refreshTokenHash      String     @unique
+  expiresAt             DateTime // 滑动续期
+  createdAt             DateTime   @default(now())
+  lastRenewedAt         DateTime   @default(now())
+
+  @@map("client_credentials")
+}
+
+/// 端口占用（服务端记录为准；回收 = 置 RELEASED）
+model PortLease {
+  id                String      @id @default(cuid())
+  teamId            String
+  team              Team        @relation(fields: [teamId], references: [id])
+  keyId             String
+  licenseKey        LicenseKey  @relation(fields: [keyId], references: [id])
+  clientId          String
+  channelAccountKey String // channel:accountId 稳定标识
+  status            LeaseStatus @default(HELD)
+  acquiredAt        DateTime    @default(now())
+  lastSeenAt        DateTime    @default(now())
+  releasedAt        DateTime?
+  /// 代理出口展示信息（如 'SOCKS5·新加坡'），仅展示用途
+  proxyExit         String?
+  /// IM 渠道账号业务状态：ONLINE / WAITING_QR / OFFLINE / RELEASED，仅展示用途
+  channelStatus     String?
+
+  @@map("port_leases")
+}
+
+/// 翻译 API Key（AES-256-GCM 加密存储；管理后台唯一持有）
+model TranslationKey {
+  id                String               @id @default(cuid())
+  engine            TranslationEngine
+  name              String
+  keyEncrypted      String
+  status            TranslationKeyStatus @default(ACTIVE)
+  quotaLimit        Int? // null = 不设限
+  quotaUsed         Int                  @default(0) // 冗余计数
+  lastFailureReason String?
+  lastUsedAt        DateTime?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  translationLogs TranslationUsageLog[]
+
+  @@map("translation_keys")
+}
+
+/// 引擎语种能力（(engine, languageCode) 唯一）
+model EngineLanguageSupport {
+  id           String            @id @default(cuid())
+  engine       TranslationEngine
+  languageCode String // ISO 639-1
+  status       LangSupportStatus @default(SUPPORTED)
+  updatedAt    DateTime          @updatedAt
+
+  @@unique([engine, languageCode])
+  @@map("engine_language_supports")
+}
+
+/// 翻译用量日志（计量唯一真相源；只在翻译接口返回成功时插入）
+model TranslationUsageLog {
+  id             String            @id @default(cuid())
+  teamId         String
+  team           Team              @relation(fields: [teamId], references: [id])
+  keyId          String?
+  translationKey TranslationKey?   @relation(fields: [keyId], references: [id])
+  engine         TranslationEngine
+  chars          Int // 该次翻译的原文字符数
+  success        Boolean           @default(true) // 恒 true，失败不落此表
+  createdAt      DateTime          @default(now())
+  licenseKey     LicenseKey?       @relation(fields: [licenseKeyId], references: [id])
+  licenseKeyId   String?
+
+  @@index([teamId, createdAt])
+  @@index([keyId, createdAt])
+  @@map("translation_usage_logs")
+}
+
+/// Key 每日用量聚合缓存（T5-03：每小时聚合一次 + 实时计数兜底，避免每次查询扫全表）
+model KeyDailyUsage {
+  id        String            @id @default(cuid())
+  keyId     String
+  date      String // YYYY-MM-DD（按 UTC 日期聚合）
+  engine    TranslationEngine
+  chars     Int  @default(0) // 当日累计字符
+  calls     Int  @default(0) // 当日累计调用次数
+  failures  Int  @default(0) // 当日累计失败次数（进程内计数快照，重启后从此值继续）
+  updatedAt DateTime          @updatedAt
+
+  @@unique([keyId, date])
+  @@index([keyId, date])
+  @@map("key_daily_usages")
+}
+
+/// 审计日志（凭据篡改、指纹不匹配、团队/密钥禁用、配额调整等）
+model AuditLog {
+  id        String    @id @default(cuid())
+  actorType ActorType
+  actorId   String
+  action    String
+  detail    String? // JSON
+  ip        String?
+  createdAt DateTime  @default(now())
+
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+/// 凭据撤销名单（续期轮换宽限期 + 主动吊销）
+model RevokedToken {
+  id       String       @id @default(cuid())
+  jti      String       @unique
+  reason   RevokeReason
+  revokeAt DateTime     @default(now())
+
+  @@index([revokeAt])
+  @@map("revoked_tokens")
+}
+
+/// 后台会话（不透明随机串，存 SHA-256 哈希；有效期 8h）
+model BackofficeSession {
+  id        String       @id @default(cuid())
+  accountId String
+  account   AdminAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  tokenHash String       @unique
+  expiresAt DateTime
+  createdAt DateTime     @default(now())
+  revokedAt DateTime? // 登出 / 改密 / 重置置位
+
+  @@map("backoffice_sessions")
+}

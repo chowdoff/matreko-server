@@ -1,0 +1,532 @@
+### =====================================================================
+### matreko-server M3 端口租约管理 —— 接口联调测试（VS Code REST Client 版）
+### =====================================================================
+### 运行环境：VS Code + REST Client 插件（扩展 ID: humao.rest-client）
+### 使用方式：
+###   1. 先在 VS Code 扩展市场安装 "REST Client"
+###   2. 打开本文件，按 ### 编号顺序逐步执行（点请求上方的 "Send Request"）
+###   3. 每次执行后，把响应中的关键值手动填到顶部对应变量，再执行下一步
+### 服务地址：localhost:3000（.env 中 PORT 配置），如需改端口改 @host。
+### =====================================================================
+### 测试覆盖：
+###   T3-01 端口申请（AC1/AC10）
+###     - 事务内防超卖：held < portQuota 才允许
+###     - 幂等：同 (clientId, channelAccountKey) 已 HELD → 返回已有 lease
+###     - 端口用尽返回 409 PORT_EXHAUSTED
+###   T3-02 心跳协议（AC2/AC8/AC12）
+###     - 每 2min 上报全部 leaseId，刷新 lastSeenAt
+###     - 返回已撤销 lease（回收/撤销感知）
+###     - 配额下调导致 held > quota → overQuota + pendingCloseLeaseIds
+###   T3-03 端口释放（AC3）
+###     - 主动释放单端口，可用端口实时 +1
+###     - 幂等：重复释放返回 alreadyReleased
+###   T3-04 端口归零（AC4/AC7）
+###     - 启动/强杀重启时释放本机全部 HELD
+###     - 不等 24h 超时，立即回收
+###   T3-05 手动释放与列表（AC11/AC2）
+###     - 主管/管理员手动释放卡死端口
+###     - 首次未 confirm 返回 409，确认后释放
+###     - 主管看本团队、管理员看全平台
+### =====================================================================
+
+@host = http://localhost:3000
+@platformEmail = admin@matreko.local
+@platformPassword = Admin12345
+
+# 主管邮箱与设备指纹，可按需修改
+@supervisorEmail = sup_m3_test@matreko.local
+@fingerprint = fp-m3-mac-001
+
+# ── 以下为动态变量，执行到对应步骤后手动回填 ──
+# 填第1.1步响应的 data.token
+@platformToken = M491YKKRlA8bcic-qxsY1-RBVg_nhJkZMYkyjg8vvBI
+# 填第2.1步响应的 data.team.id
+@teamId = cmt16tok0000uuo1t4ekd51o6
+# 填第2.1步响应的 data.supervisor.id
+@supervisorId = cmt16tok1000wuo1tcjwck81g
+# 填第2.1步响应的 data.initialPassword（仅此一次返回，勿丢）
+@supervisorPassword = OcwDLOgEZW9F
+# 填第3.1步响应的 data.token
+@supervisorToken = DBDEXCIcpNLGijQeKe6NVc2mvS6qlT-kKZyYi_zeXMg
+# 填第4.1步响应的 data.licenseKey.id
+@licenseKeyId = cmt16ujm60012uo1tvnlxfnvl
+# 填第4.1步响应的 data.plaintextCode（仅此一次返回）
+@licenseCode = MTRK-MCV2-UHKH-FJKY-5LBM
+# 填第5.1步响应的 data.accessToken
+@clientAccessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlfRllFT1p3aEFNZ2dIY3NlSGI5M3JSZyIsImtleUlkIjoiY210MTZ1am02MDAxMnVvMXR2bmx4Zm52bCIsImRldmljZUZpbmdlcnByaW50SGFzaCI6IjQxMTM5MjIyMzRlNGQ3MjQzZDQyZWUzOWY2Nzg3NDE2Y2I2NTRlODkwNmFiN2RiMTVhN2NhNTAyNmU4MTJmZDAiLCJqdGkiOiJxQ2c3Y19Rc0M3cTcwVTNicnN1Zk93IiwidG9rZW5fdHlwZSI6ImNsaWVudCIsImlhdCI6MTc4NzIxMDI5NSwiZXhwIjoxNzg3MjExMTk1fQ.wpEvs031ojIuRtG4lfHG4l3iJ2gBPPRpyf53dVk2PYo
+# 填第5.1步响应的 data.clientId
+@clientId = cli_FYEOZwhAMggHcseHb93rRg
+# 填第6.1步响应的 data.leaseId
+@leaseId1 = cmt16vpbk001auo1th8c700ep
+# 填第6.2步响应的 data.leaseId
+@leaseId2 = cmt16w2d4001cuo1tlopjk98a
+# 填第6.3步响应的 data.leaseId
+@leaseId3 = cmt16wd0j001euo1tmukmkkc2
+# 填第15.1步响应的 data.leaseId（归零后重新申请）
+@leaseId5 = cmt16ydwf001guo1tomqcrxsq
+# 填第21.1步响应的 data.leaseId（overQuota 测试用）
+@leaseId6 = cmt174tbu001luo1tzsmzmo8v
+# 填第21.2步响应的 data.leaseId
+@leaseId7 = cmt175gz2001nuo1tv3svn3b7
+
+### =====================================================================
+### 阶段 0：健康检查
+### =====================================================================
+
+### 0.1 查看 OpenAPI 文档（确认服务在线 + M3 路由已注册）
+GET {{host}}/api-docs.json
+
+### =====================================================================
+### 阶段 1：平台管理员登录
+### =====================================================================
+
+### 1.1 平台管理员登录 → 回填 @platformToken
+POST {{host}}/api/platform/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{platformEmail}}",
+  "password": "{{platformPassword}}"
+}
+
+### =====================================================================
+### 阶段 2：创建测试团队（M3 前置依赖）
+### =====================================================================
+
+### 2.1 创建团队（portQuota=3）→ 回填 @teamId / @supervisorId / @supervisorPassword
+###     initialPassword 仅此一次返回，切勿丢失
+POST {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "name": "M3测试团队_端口租约",
+  "supervisorEmail": "{{supervisorEmail}}",
+  "expiresAt": "2028-06-30T23:59:59+08:00",
+  "portQuota": 3,
+  "translationQuota": 1000000
+}
+
+### =====================================================================
+### 阶段 3：主管登录 + 生成密钥 + 客户端激活
+### =====================================================================
+
+### 3.1 主管登录 → 回填 @supervisorToken
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### 4.1 生成密钥 → 回填 @licenseKeyId / @licenseCode
+POST {{host}}/api/supervisor/licenses
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "nickname": "客服M3-01",
+  "multiDeviceEnabled": false
+}
+
+### 5.1 客户端激活 → 回填 @clientAccessToken / @clientId
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprint}}",
+  "deviceLabel": "M3测试机-Mac"
+}
+
+### =====================================================================
+### 阶段 4：T3-01 端口申请（AC1/AC10）
+### =====================================================================
+
+### 6.1 端口申请（第1个）→ 回填 @leaseId1
+###     预期 200 + data.alreadyHeld=false
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc001"
+}
+
+### 6.2 端口申请（第2个）→ 回填 @leaseId2
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "whatsapp:acc002"
+}
+
+### 6.3 端口申请（第3个，配额=3）→ 回填 @leaseId3
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc003"
+}
+
+### 6.4 超卖测试（第4个应拒绝）→ 预期 409 PORT_EXHAUSTED
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc004"
+}
+
+### 6.5 幂等测试：同一 channelAccountKey 再次申请 → 预期 200 + 同一 leaseId + alreadyHeld=true
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc001"
+}
+
+### 6.6 鉴权拦截：无 Token → 预期 401
+POST {{host}}/api/client/ports/acquire
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:noauth"
+}
+
+### 6.7 参数校验：缺少 channelAccountKey → 预期 400
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": ""
+}
+
+### =====================================================================
+### 阶段 5：T3-02 心跳协议（AC2/AC8/AC12）
+### =====================================================================
+
+### 7.1 心跳（上报3个 lease）→ 预期 refreshed=3, revoked=0, held=3, quota=3
+POST {{host}}/api/client/ports/heartbeat
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseIds": ["{{leaseId1}}", "{{leaseId2}}", "{{leaseId3}}"]
+}
+
+### 7.2 心跳（上报不存在的 leaseId）→ 预期 该 leaseId 出现在 revokedLeaseIds 中
+POST {{host}}/api/client/ports/heartbeat
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseIds": ["nonexistent-lease-id"]
+}
+
+### 7.3 心跳（空数组）→ 预期 200 + refreshed=0, revoked=0, held=3
+POST {{host}}/api/client/ports/heartbeat
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseIds": []
+}
+
+### =====================================================================
+### 阶段 6：T3-03 端口释放（AC3）
+### =====================================================================
+
+### 8.1 释放端口（lease3）→ 预期 200 + alreadyReleased=false
+POST {{host}}/api/client/ports/release
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseId": "{{leaseId3}}"
+}
+
+### 8.2 释放后心跳（上报含已释放的 lease3）→ 预期 revoked=1, held=2
+POST {{host}}/api/client/ports/heartbeat
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseIds": ["{{leaseId1}}", "{{leaseId2}}", "{{leaseId3}}"]
+}
+
+### 8.3 幂等：重复释放同一 lease → 预期 200 + alreadyReleased=true
+POST {{host}}/api/client/ports/release
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseId": "{{leaseId3}}"
+}
+
+### 8.4 释放不存在的 lease → 预期 404
+POST {{host}}/api/client/ports/release
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseId": "nonexistent-lease-id"
+}
+
+### =====================================================================
+### 阶段 7：T3-04 端口归零（AC4/AC7）
+### =====================================================================
+
+### 9.1 端口归零（释放本机全部 HELD）→ 预期 200 + releasedCount=2
+POST {{host}}/api/client/ports/reset
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+
+### 9.2 归零后心跳（上报旧 lease）→ 预期 全部出现在 revoked 中
+POST {{host}}/api/client/ports/heartbeat
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseIds": ["{{leaseId1}}", "{{leaseId2}}"]
+}
+
+### 9.3 归零后重新申请（端口应可用）→ 回填 @leaseId5
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc005"
+}
+
+### =====================================================================
+### 阶段 8：T3-05 手动释放与列表（AC11/AC2）
+### =====================================================================
+
+### 10.1 主管端口列表 → 预期返回本团队 HELD 租约列表
+GET {{host}}/api/supervisor/ports
+Authorization: Bearer {{supervisorToken}}
+
+### 10.2 主管手动释放（未 confirm）→ 预期 409
+POST {{host}}/api/supervisor/ports/{{leaseId5}}/release
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "confirm": false
+}
+
+### 10.3 主管手动释放（confirm=true）→ 预期 200 + alreadyReleased=false
+POST {{host}}/api/supervisor/ports/{{leaseId5}}/release
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 10.4 释放后再心跳 → 预期 lease5 出现在 revoked 中（撤销感知 ≤2min）
+POST {{host}}/api/client/ports/heartbeat
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseIds": ["{{leaseId5}}"]
+}
+
+### 10.5 主管手动释放不存在的 lease → 预期 404
+POST {{host}}/api/supervisor/ports/nonexistent-lease-id/release
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 10.6 鉴权拦截：无 Token → 预期 401
+GET {{host}}/api/supervisor/ports
+
+### 10.7 鉴权拦截：客户端 Token 调用主管接口 → 预期 403
+GET {{host}}/api/supervisor/ports
+Authorization: Bearer {{clientAccessToken}}
+
+### =====================================================================
+### 阶段 9：管理员侧端口管理
+### =====================================================================
+
+### 11.1 管理员端口列表（全平台）→ 预期返回所有团队 HELD 租约
+GET {{host}}/api/platform/ports
+Authorization: Bearer {{platformToken}}
+
+### 11.2 管理员手动释放（confirm=true）→ 可释放任意团队端口
+###     需先申请一个新端口（因为之前的都已释放）
+POST {{host}}/api/platform/ports/{{leaseId5}}/release
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 11.3 鉴权拦截：主管 Token 调用平台接口 → 预期 403
+GET {{host}}/api/platform/ports
+Authorization: Bearer {{supervisorToken}}
+
+### =====================================================================
+### 阶段 10：配额下调 + overQuota 联动（AC12）
+### =====================================================================
+
+### 12.1 申请2个端口 → 回填 @leaseId6 / @leaseId7
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc006"
+}
+
+### 12.2 申请第2个端口 → 回填 @leaseId7
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc007"
+}
+
+### 12.3 下调配额到 1（当前 held=2 > quota=1）
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": 1
+}
+
+### 12.4 心跳（应返回 overQuota=true + pendingCloseLeaseIds 含2个）→ 预期 AC12
+POST {{host}}/api/client/ports/heartbeat
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "leaseIds": ["{{leaseId6}}", "{{leaseId7}}"]
+}
+
+### 12.5 新申请应被拒绝（held > quota）→ 预期 409 PORT_EXHAUSTED
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc008"
+}
+
+### 12.6 恢复配额到 3（验证可继续申请）
+PUT {{host}}/api/platform/teams/{{teamId}}/quotas
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "portQuota": 5
+}
+
+### 12.7 恢复后申请 → 预期 200
+POST {{host}}/api/client/ports/acquire
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprint}}
+Content-Type: application/json
+
+{
+  "channelAccountKey": "telegram:acc009"
+}
+
+### =====================================================================
+### 阶段 11：TTL 过期扫描验证（后台 cron，手动触发可选）
+### =====================================================================
+
+### 11.1 手动触发过期扫描（需在服务端代码中暴露调试端点，正常通过 cron 自动执行）
+###     cron 间隔: leaseScanMinutes（.env 配置，默认 1min）
+###     TTL: leaseTtlMs（.env 配置，默认 24h）
+###     扫描时写 SYSTEM 审计日志 LEASE_RELEASED_TIMEOUT
+
+### =====================================================================
+### 阶段 12：登出
+### =====================================================================
+
+### 12.1 主管登出
+POST {{host}}/api/supervisor/auth/logout
+Authorization: Bearer {{supervisorToken}}
+
+### 12.2 平台管理员登出
+POST {{host}}/api/platform/auth/logout
+Authorization: Bearer {{platformToken}}
+
+### =====================================================================
+### 附录：边界与异常场景速查
+### =====================================================================
+### 以下请求可独立执行，用于快速验证边界行为
+### =====================================================================
+
+### A.1 端口配额=0 的团队申请 → 预期 409 PORT_EXHAUSTED
+# POST {{host}}/api/client/ports/acquire
+# Authorization: Bearer {{clientAccessToken}}
+# X-Device-Fingerprint: {{fingerprint}}
+# Content-Type: application/json
+#
+# {
+#   "channelAccountKey": "telegram:zero-quota"
+# }
+
+### A.2 channelAccountKey 超长字符串 → 预期 400（如 schema 有 maxLength）
+# POST {{host}}/api/client/ports/acquire
+# Authorization: Bearer {{clientAccessToken}}
+# X-Device-Fingerprint: {{fingerprint}}
+# Content-Type: application/json
+#
+# {
+#   "channelAccountKey": "telegram:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# }
+
+### A.3 缺少 X-Device-Fingerprint header → 预期 401
+# POST {{host}}/api/client/ports/acquire
+# Authorization: Bearer {{clientAccessToken}}
+# Content-Type: application/json
+#
+# {
+#   "channelAccountKey": "telegram:no-fp"
+# }
+
+### A.4 主管手动释放其他团队的端口 → 预期 403
+# POST {{host}}/api/supervisor/ports/{{otherTeamLeaseId}}/release
+# Authorization: Bearer {{supervisorToken}}
+# Content-Type: application/json
+#
+# {
+#   "confirm": true
+# }

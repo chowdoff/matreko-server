@@ -1,0 +1,325 @@
+### =====================================================================
+### matreko-server M1 登录鉴权体系 —— 接口联调测试（VS Code REST Client 版）
+### =====================================================================
+### 运行环境：VS Code + REST Client 插件（扩展 ID: humao.rest-client）
+### 使用方式：
+###   1. 先在 VS Code 扩展市场安装 "REST Client"
+###   2. 打开本文件，按 ### 编号顺序逐步执行（点请求上方的 "Send Request"）
+###   3. 每次执行后，把响应中的关键值手动填到顶部对应变量，再执行下一步
+### 服务地址：localhost:3000（.env 中 PORT 配置），如需改端口改 @host。
+### =====================================================================
+
+@host = http://localhost:3000
+@platformEmail = admin@platform.example
+@platformPassword = Admin12345
+# 主管邮箱与设备指纹，可按需修改（改后同步修改后面请求中的引用）
+@supervisorEmail = sup_lyq@matreko.local
+@fingerprintA = fp-test-mac-001
+@fingerprintB = fp-test-win-002
+
+# ── 以下为动态变量，执行到对应步骤后手动回填 ──
+# 填第1.1步响应的 data.token
+@platformToken = kSiqfAX17ZNdO25-Jl8vwClXYWkjiqWcSLs9OYHiTwc
+# 填第2.1步响应的 data.supervisor.id
+@supervisorId = cmt6p5lz50005uos9vifwe750
+# 填第2.1步响应的 data.initialPassword（仅此一次返回，勿丢） 
+@supervisorPassword = NjLa8Hptr45T
+# 填第2.1步响应的 data.team.id
+@teamId = cmt6p5lz40003uos9h8o524i3
+# 填第3.1步响应的 data.token
+@supervisorToken = hnNiJkJVa7wH9GgUJi7QBGQQrgNAHn3p89OolsKEO3E
+# 填第4.1步响应的 data.licenseKey.id
+@licenseKeyId = cmt6p7881000buos9i1zrlwmu
+# 填第4.1步响应的 data.plaintextCode（仅此一次返回，勿丢）
+@licenseCode = MTRK-JR3T-W3JF-2ECW-BVZJ
+# 填第5.1步响应的 data.accessToken
+@clientAccessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlfblZuYmpBZW53bWVMTjFEVUFjamRFZyIsImtleUlkIjoiY210NnA3ODgxMDAwYnVvczlpMXpybHdtdSIsImRldmljZUZpbmdlcnByaW50SGFzaCI6IjcxMDAzZTI4OGQ5YTY5MGJiNzcxN2IwM2Y4MzVlOWY0NTdiMDQxYTBlYzZlMjc4NzljYjJkZGZhNDAwZDRhNDUiLCJqdGkiOiItOHpDUGdzaEVSWnZrVm9WOVoyRUx3IiwidG9rZW5fdHlwZSI6ImNsaWVudCIsImlhdCI6MTc4NzU0MzczMiwiZXhwIjoxNzg3NTQ0NjMyfQ.RearOvlMMnaTFx9e5dnM2B4QQ9QLRETOi3yW5hq9pSE
+# 填第5.1步响应的 data.refreshToken
+@clientRefreshToken = hpyh1Z3p1Vavsxmu4efP7AQN8T_cQvj2N5nCE1Z0OXs
+# 填第5.1步响应的 data.device.id
+@bindingAId = cmt6pdvqb000euos98w5l7u0n
+# 填第7.2步响应的 data.device.id
+@bindingBId = 
+
+### =====================================================================
+### 阶段 0：健康检查（可选）
+### =====================================================================
+
+### 0.1 查看 OpenAPI 文档（确认服务在线）
+GET {{host}}/api-docs.json
+
+### =====================================================================
+### 阶段 1：平台管理员登录
+### =====================================================================
+
+### 1.1 平台管理员登录 → 把响应的 data.token 填入顶部 @platformToken
+POST {{host}}/api/platform/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{platformEmail}}",
+  "password": "{{platformPassword}}"
+}
+
+### =====================================================================
+### 阶段 2：创建团队（平台管理员）
+### =====================================================================
+
+### 2.1 创建团队 → 回填 @supervisorId / @supervisorPassword / @teamId
+###     注意：initialPassword 仅此一次返回，库中只存哈希，切勿丢失
+POST {{host}}/api/platform/teams
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "name": "华东客服一组_0819",
+  "supervisorEmail": "{{supervisorEmail}}",
+  "expiresAt": "2027-01-01T00:00:00+08:00",
+  "portQuota": 10,
+  "translationQuota": 1500000
+}
+
+### =====================================================================
+### 阶段 3：主管登录
+### =====================================================================
+
+### 3.1 主管登录（用 2.1 返回的邮箱 + initialPassword）→ 回填 @supervisorToken
+POST {{host}}/api/supervisor/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{supervisorEmail}}",
+  "password": "{{supervisorPassword}}"
+}
+
+### =====================================================================
+### 阶段 4：密钥管理（主管）
+### =====================================================================
+
+### 4.1 生成密钥 → 回填 @licenseKeyId / @licenseCode（明文仅此一次返回）
+POST {{host}}/api/supervisor/licenses
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "nickname": "客服E",
+  "multiDeviceEnabled": true
+}
+
+### 4.2 密钥列表（确认当前 1 条 UNUSED）
+GET {{host}}/api/supervisor/licenses
+Authorization: Bearer {{supervisorToken}}
+
+### 4.3 密钥统计（总数 / 已激活 / 未激活 / 已禁用）
+GET {{host}}/api/supervisor/licenses/stats
+Authorization: Bearer {{supervisorToken}}
+
+### =====================================================================
+### 阶段 5：客户端激活与查询
+### =====================================================================
+
+### 5.1 设备A 激活（密钥 + 指纹）→ 回填 @clientAccessToken / @clientRefreshToken / @bindingAId
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprintA}}",
+  "deviceLabel": "测试机-Mac"
+}
+
+### 5.2 客户端查询当前账号（需 accessToken + 指纹，两者都要求）
+GET {{host}}/api/client/me
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+
+### 5.3 客户端查询团队配额使用情况
+GET {{host}}/api/client/team/usage
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+
+### =====================================================================
+### 阶段 6：凭据续期（无缝续期）
+### =====================================================================
+
+### 6.1 用 refresh token 换新凭据 → 回填 @clientAccessToken / @clientRefreshToken
+###     旧的 access/refresh 立即作废；60 秒宽限期内旧 access 仍放行
+POST {{host}}/api/client/auth/renew
+Authorization: Bearer {{clientRefreshToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+Content-Type: application/json
+
+{}
+
+### 6.2 用续期后的新 access 访问（验证新凭据可用）
+GET {{host}}/api/client/me
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+
+### 6.3 客户端登出（撤销当前凭据；执行后该 access 失效）
+POST {{host}}/api/client/auth/logout
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+
+### =====================================================================
+### 阶段 7：多设备开关（AC9）
+### =====================================================================
+
+### 7.1 开启多开（上限 5 台）
+POST {{host}}/api/supervisor/licenses/{{licenseKeyId}}/multi-device
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "enabled": true
+}
+
+### 7.2 设备B 激活（第二台设备，需多开已开启）→ 回填 @bindingBId
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprintB}}",
+  "deviceLabel": "测试机-Windows"
+}
+
+### 7.3 关闭多开但未指定保留设备 → 预期 409 STATUS_CHANGED（AC9 拒绝）
+POST {{host}}/api/supervisor/licenses/{{licenseKeyId}}/multi-device
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "enabled": false
+}
+
+### 7.4 关闭多开并保留设备A → 204（设备B 凭据被下线）
+POST {{host}}/api/supervisor/licenses/{{licenseKeyId}}/multi-device
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "enabled": false,
+  "keepDeviceBindingId": "{{bindingAId}}"
+}
+
+### =====================================================================
+### 阶段 8：禁用密钥（AC7）
+### =====================================================================
+
+### 8.1 密钥活跃且有绑定，未确认直接禁用 → 预期 409 STATUS_CHANGED
+POST {{host}}/api/supervisor/licenses/{{licenseKeyId}}/disable
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{}
+
+### 8.2 确认后禁用 → 204（所有设备凭据失效）
+POST {{host}}/api/supervisor/licenses/{{licenseKeyId}}/disable
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "confirm": true
+}
+
+### 8.3 禁用后重新激活 → 预期 403 KEY_DISABLED（禁用态不可激活，断权验证）
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprintA}}",
+  "deviceLabel": "测试机-Mac"
+}
+
+### 8.4 启用密钥（密钥可禁用/可启用）→ 有绑定设备恢复为 ACTIVE
+POST {{host}}/api/supervisor/licenses/{{licenseKeyId}}/enable
+Authorization: Bearer {{supervisorToken}}
+
+### 8.5 设备A 重新激活 → 成功（alreadyActivated=true, reissued=true，补发新凭据）
+###     回填 @clientAccessToken / @clientRefreshToken（旧的已失效）
+POST {{host}}/api/client/activate
+Content-Type: application/json
+
+{
+  "code": "{{licenseCode}}",
+  "fingerprint": "{{fingerprintA}}",
+  "deviceLabel": "测试机-Mac"
+}
+
+### 8.6 用补发的新凭据访问（验证已恢复可用）
+GET {{host}}/api/client/me
+Authorization: Bearer {{clientAccessToken}}
+X-Device-Fingerprint: {{fingerprintA}}
+
+### =====================================================================
+### 阶段 9：设备解绑（主管）
+### =====================================================================
+
+### 9.1 解绑设备A（密钥已重新启用、绑定仍在，可解绑）→ 200
+POST {{host}}/api/supervisor/devices/{{bindingAId}}/unbind
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{}
+
+### 9.2 密钥列表（确认设备绑定已清空、状态为 ACTIVE）
+GET {{host}}/api/supervisor/licenses
+Authorization: Bearer {{supervisorToken}}
+
+### =====================================================================
+### 阶段 10：登出
+### =====================================================================
+
+### 10.1 主管登出
+POST {{host}}/api/supervisor/auth/logout
+Authorization: Bearer {{supervisorToken}}
+
+### 10.2 平台管理员登出
+POST {{host}}/api/platform/auth/logout
+Authorization: Bearer {{platformToken}}
+
+
+### =====================================================================
+### 可选：管理功能演示（会改变账号状态，建议主流程跑完后再单独执行）
+### =====================================================================
+
+### A.1 平台重置主管密码（需重新登录平台获取 token；重置后主管旧会话全部失效）
+POST {{host}}/api/platform/auth/reset-password
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "accountId": "{{supervisorId}}",
+  "newPassword": "NewSupPass123"
+}
+
+### B.1 平台禁用主管账号（禁用后该主管所有会话失效，无法再登录）
+POST {{host}}/api/platform/auth/disable-account
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "accountId": "{{supervisorId}}"
+}
+
+### C.1 主管修改密码（改后其余会话失效，当前会话保留；需先重新登录主管）
+POST {{host}}/api/supervisor/auth/change-password
+Authorization: Bearer {{supervisorToken}}
+Content-Type: application/json
+
+{
+  "oldPassword": "{{supervisorPassword}}",
+  "newPassword": "NewSupPass123"
+}
+
+### D.1 平台管理员修改密码（改后其余平台会话失效，当前会话保留）
+POST {{host}}/api/platform/auth/change-password
+Authorization: Bearer {{platformToken}}
+Content-Type: application/json
+
+{
+  "oldPassword": "{{platformPassword}}",
+  "newPassword": "NewAdminPass123"
+}
