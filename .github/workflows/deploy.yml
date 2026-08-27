@@ -54,7 +54,22 @@ jobs:
           port: ${{ secrets.SSH_PORT || 22 }}
           script: |
             set -e
-            cd /opt/matreko
+            REPO_DIR=/opt/matreko
+            mkdir -p "$REPO_DIR"
+            cd "$REPO_DIR"
+            # 目录还不是 git 仓库时，先暂存已有的 data/.env，克隆仓库后再还原，
+            # 让流水线不依赖人工预先在服务器上 clone（兼容目录非空/有残留子目录等情况）
+            if [ ! -d .git ]; then
+              TMP=$(mktemp -d)
+              [ -e data ] && mv data "$TMP/"
+              [ -e .env ] && mv .env "$TMP/"
+              rm -rf ./* ./.[!.]* 2>/dev/null || true
+              git clone https://github.com/chowdoff/matreko-server.git .
+              [ -e "$TMP/data" ] && mv "$TMP/data" .
+              [ -e "$TMP/.env" ] && mv "$TMP/.env" .
+            else
+              git pull --ff-only
+            fi
             docker compose pull
             docker compose up -d
             docker image prune -f
