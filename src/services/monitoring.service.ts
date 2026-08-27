@@ -22,6 +22,16 @@ export const FAILURE_REASONS = [
 
 export type FailureReasonCode = (typeof FAILURE_REASONS)[number]['code'];
 
+/** 翻译失败原因分布的一行（含无法识别的 OTHER 兜底项） */
+export type FailureReasonRow = {
+  code: FailureReasonCode | 'OTHER';
+  label: string;
+  count: number;
+  percentage: number;
+  retryable: boolean;
+  action: string;
+};
+
 export class MonitoringService {
   /**
    * 平台级运行监控 overview（P1-S-17 AC1）：
@@ -152,14 +162,7 @@ export class MonitoringService {
    */
   private computeReasonDistribution(
     failureLogs: { detail: string | null }[],
-  ): Array<{
-    code: FailureReasonCode | 'OTHER';
-    label: string;
-    count: number;
-    percentage: number;
-    retryable: boolean;
-    action: string;
-  }> {
+  ): FailureReasonRow[] {
     const counts = new Map<string, number>();
     let unknownCount = 0;
     for (const log of failureLogs) {
@@ -176,7 +179,7 @@ export class MonitoringService {
       counts.set(code, (counts.get(code) ?? 0) + 1);
     }
     const total = failureLogs.length || 1;
-    const result = FAILURE_REASONS.map((r) => {
+    const result: FailureReasonRow[] = FAILURE_REASONS.map((r) => {
       const count = counts.get(r.code) ?? 0;
       return {
         code: r.code,

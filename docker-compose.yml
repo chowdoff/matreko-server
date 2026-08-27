@@ -1,0 +1,16 @@
+services:
+  app:
+    # 由 GitHub Actions 构建并推送到 GitHub Container Registry 的镜像
+    image: ghcr.io/chowdoff/matreko-server:latest
+    container_name: matreko
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      # SQLite 持久化：宿主机 /opt/matreko/data -> 容器 /data
+      # 对应 .env 中 DATABASE_URL="file:/data/prod.db"
+      - ./data:/data
+      # 服务器端 .env（含密钥，不进仓库）挂载进容器供 dotenv 读取
+      - ./.env:/app/.env:ro

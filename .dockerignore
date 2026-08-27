@@ -1,0 +1,21 @@
+# 依赖（构建时重新安装）
+node_modules
+
+# 构建产物（镜像内用 tsx 直接跑源码，无需 dist）
+dist
+
+# 密钥与环境（绝不进入镜像）
+.env
+.env.*
+
+# 本地数据库文件
+*.db
+*.db-journal
+
+# 工具元数据
+.workbuddy
+
+# 日志与杂项
+npm-debug.log*
+.DS_Store
+coverage
