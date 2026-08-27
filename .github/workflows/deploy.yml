@@ -70,6 +70,20 @@ jobs:
             else
               git pull --ff-only
             fi
+
+            # 服务器必须存在 .env（含密钥，不进仓库）。缺失则生成模板并提示，终止本次部署。
+            if [ ! -f .env ]; then
+              cp deploy/env.example .env
+              echo "============================================================="
+              echo ">>> 缺少 /opt/matreko/.env（密钥文件，不进仓库）"
+              echo ">>> 已自动生成模板，请到服务器编辑 /opt/matreko/.env 填入真实值："
+              echo "    PORT, DATABASE_URL, PLATFORM_EMAIL, PLATFORM_INITIAL_PASSWORD,"
+              echo "    API_KEY_ENC_KEY, JWT_SECRET, LICENSE_CODE_ENC_KEY, DEEPL_API_KEY 等"
+              echo ">>> 填好后重新触发本流水线（Actions -> Run workflow）即可完成部署"
+              echo "============================================================="
+              exit 1
+            fi
+
             docker compose pull
             docker compose up -d
             docker image prune -f
