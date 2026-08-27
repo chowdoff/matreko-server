@@ -5,10 +5,9 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# 生产环境变量
-ENV NODE_ENV=production
-
 # 先拷贝依赖清单，利用 Docker 层缓存（仅当 package*.json 变化时才重装依赖）
+# 注意：切勿在此处设置 NODE_ENV=production，否则 npm ci 会省略 devDependencies
+#（@types/* 与 tsx 都在 devDependencies 中，省略后 tsc 类型检查会因找不到类型而失败）
 COPY package.json package-lock.json ./
 RUN npm ci
 
@@ -20,6 +19,9 @@ RUN npx prisma generate
 
 # 类型检查：类型错误会让镜像构建失败，避免带病上线
 RUN npx tsc --noEmit
+
+# 生产环境变量（必须放在依赖安装与构建步骤之后，否则会影响 npm ci 的依赖安装）
+ENV NODE_ENV=production
 
 EXPOSE 3000
 
