@@ -39,10 +39,13 @@ jobs:
     name: Deploy to Server
     needs: build-and-push
     runs-on: ubuntu-latest
+    # GitHub 不允许在 if 表达式里直接引用 secrets，故用 env 中转后再在 if 判断
+    env:
+      DEPLOY_ENABLED: ${{ secrets.SSH_HOST != '' && secrets.SSH_PRIVATE_KEY != '' }}
     steps:
       - name: Deploy via SSH
-        # 仅在配置了 SSH 密钥后才执行部署；未配置时跳过（不报错），方便先合代码、后配密钥
-        if: ${{ secrets.SSH_HOST != '' && secrets.SSH_PRIVATE_KEY != '' }}
+        # 仅在配置了 SSH 密钥后才执行部署；未配置时跳过（不报错）
+        if: ${{ env.DEPLOY_ENABLED == 'true' }}
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
