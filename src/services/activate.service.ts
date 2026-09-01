@@ -69,38 +69,10 @@ export class ActivateService {
         where: { keyId_fingerprintHash: { keyId: latest.id, fingerprintHash } },
       });
       if (existing) {
-        // 绑定仍在：取最近一条凭据，判断其 refresh token 是否仍有效
-        const credential = await tx.clientCredential.findFirst({
-          where: { keyId: latest.id, deviceFingerprintHash: fingerprintHash },
-          orderBy: { expiresAt: 'desc' },
-        });
-        const credentialValid = !!credential && credential.expiresAt.getTime() > Date.now();
-        if (credentialValid) {
-          // 绑定与凭据均有效 → 幂等返回，客户端仍持有可用 refresh token；
-          // 但为让客户端激活后立即可调用其他 API（不必先调 /renew），一并签发新 access token。
-          const accessToken = signClientAccessToken({
-            sub: credential.clientId,
-            keyId: credential.keyId,
-            deviceFingerprintHash: credential.deviceFingerprintHash,
-            jti: randomToken(16),
-          });
-          return {
-            alreadyActivated: true as const,
-            device: existing,
-            keyId: latest.id,
-            team,
-            clientId: credential.clientId,
-            accessToken,
-            accessTokenExpiresInMs: env.accessTokenTtlMs,
-            // refresh token 不轮换（仍在客户端本地持有，调用方按需自取）
-            refreshToken: undefined,
-            refreshTokenExpiresInMs: credential.expiresAt.getTime() - Date.now(),
-          };
-        }
-        // 凭据缺失或已过期 → 补发新凭据：
-        // - 凭据曾被删除（密钥禁用，禁用时清除）→ 密钥重新启用后补发；
-        // - 凭据过期（refresh token 超时）→ 客户端重新激活即补发，
-        //   避免陷入「已激活却无可用令牌、续期又报过期」的死循环（P0-A-01 AC10 续激活）
+        // 绑定仍在：每次重新激活都补发新凭据（删除旧凭据 + 签发新令牌），
+        // 旧令牌立即作废，客户端须以本次返回的新令牌覆盖本地存储。
+        // 目的：消除「本地 refreshToken 丢失后凭据仍有效、激活又不返还」的死锁（AC10 续激活），
+        // 让客户端用本地缓存的密钥重激活即可自助捞回令牌，无需等 24 小时或找主管解绑。
         const cred = await this.issueCredential(
           tx,
           latest.id,
