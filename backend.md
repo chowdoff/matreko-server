@@ -297,8 +297,12 @@ AuditLog / RevokedToken / BackofficeSession
 
 | 凭据 | 载体 | 有效期 | 说明 |
 |------|------|--------|------|
-| access token | JWT（HS256，含 `sub`=keyId、`client_id`、`device_fp_hash`、`token_type=client`、`jti`） | **15 分钟** | 业务请求鉴权 |
-| refresh token | 256 位随机串（Base64url），服务端只存 SHA-256 哈希 | **24 小时**，每次续期滑动重置 | 换取新的 access token |
+| access token | JWT（HS256，含 `sub`=keyId、`client_id`、`device_fp_hash`、`token_type=client`、`jti`） | **3 天** | 业务请求鉴权 |
+| refresh token | 256 位随机串（Base64url），服务端只存 SHA-256 哈希 | **14 天**，每次续期滑动重置 | 换取新的 access token；客户端不缓存明文密钥，故它是**唯一的免密钥凭证** |
+
+> **TTL 定调（2026-09-07 调整）**：客户端**不缓存明文密钥**（`activate` 需明文 `code`，`renew` 仅需 refreshToken）。因此 refreshToken 一旦过期，客户端没有任何静默恢复路径，只能要求用户重新输入密钥——这正是 P0-A-01 AC2「不得外溢成隔一阵就要重输密钥」所禁止的。故 refreshToken TTL 从 24 小时放宽到 14 天，以覆盖周末、长假与设备闲置。
+>
+> **放宽不削弱安全**：撤销能力完全不依赖 TTL——解绑（删 `DeviceBinding` + 凭据）、密钥禁用（删该密钥全部凭据）、登出（删凭据）均为即时生效，且每个请求都复验凭据行（§4.3）。TTL 的唯一职责是回收长期离线设备。另需注意：滑动续期下「24 小时过期」原本只能惩罚合法用户的长期离线，攻击者拿到 refreshToken 仍可持续续期，因此该 TTL 对攻击者几乎无效。
 
 **后台会话凭据**：不透明随机串（32 字节），服务端存哈希于 `BackofficeSession`，**有效期 30 分钟、滑动续期**（每次 API 调用刷新 `expiresAt`，连续 30 分钟无操作即失效需重登），登出 / 改密 / 重置即撤销。（原 8 小时固定时长登录态已废弃；`BACKOFFICE_SESSION_TTL` 由 28800000ms 改为 1800000ms。）
 
@@ -315,15 +319,15 @@ AuditLog / RevokedToken / BackofficeSession
 
 | 令牌 | 形态 | 职责 | 如何支撑 AC |
 |------|------|------|------------|
-| **access token** | JWT HS256、15min、**无状态** | 每次业务请求鉴权；无 DB 查询、快、可水平扩展 | 短命 → 泄露窗口小；禁用场景靠 `RevokedToken`(jti, 60s) + 密钥状态缓存(≤60s) 实现 AC8 的 ≤5min 断权 |
-| **refresh token** | 256 位随机串、**库中存哈希、DB 托管**、24h 滑动、旋转式 | 用于 `POST /api/client/auth/renew` 续期；激活时签发/轮换（§5.1.1） | 因其不透明且落库，服务端可**即时作废/轮换**——这是单签名令牌做不到的：支撑 AC6 静默续期（无需重输密钥）、AC3 旧凭据立即失效（轮换删旧插新）、AC8 禁用即让 refresh 记录失效迫使重激活、AC12 在途请求不失败（旧 access jti 进 60s 宽限名单） |
+| **access token** | JWT HS256、3 天、**无状态** | 每次业务请求鉴权；无 DB 查询、快、可水平扩展 | 有效期放宽至 3 天以降低续期频率；泄露窗口不靠过期控制，而靠主动撤销——禁用场景用 `RevokedToken`(jti, 60s) + 密钥状态缓存(≤60s) 实现 AC8 的 ≤5min 断权（§4.3） |
+| **refresh token** | 256 位随机串、**库中存哈希、DB 托管**、14 天滑动、旋转式 | 用于 `POST /api/client/auth/renew` 续期；激活时签发/轮换（§5.1.1） | 因其不透明且落库，服务端可**即时作废/轮换**——这是单签名令牌做不到的：支撑 AC6 静默续期（无需重输密钥）、AC3 旧凭据立即失效（轮换删旧插新）、AC8 禁用即让 refresh 记录失效迫使重激活、AC12 在途请求不失败（旧 access jti 进 60s 宽限名单） |
 
 **结论**：access 管"高频、无状态、性能"，refresh 管"低频、服务端可控、静默续期 + 即时吊销"，正是 OAuth2 式 access+refresh 拆分，用"短命无状态令牌 + 长命服务端托管令牌"化解"体验（无感知续期）"与"安全（即时撤销）"的根本矛盾。后台会话为**人操作、重登可接受**，故只需单一 DB 会话令牌，无需拆两个。
 
 ### 4.2 自动续期与无缝轮换（P0-A-02 AC2 / AC3 / AC12 的实现）
 
 **续期流程**：
-1. 客户端在 access token 剩余有效期 ≤ **1/3**（即 ≤ 5 分钟）时，调用 `POST /api/client/auth/renew`，携带 refresh token；
+1. 客户端在 access token 剩余有效期 ≤ **1/3**（3 天即剩余 ≤ 1 天）时，调用 `POST /api/client/auth/renew`，携带 refresh token；
 2. 服务端校验 refresh token 哈希 → 校验密钥/团队状态与指纹 → **原子轮换**：
    - 旧 access token 的 `jti` 写入 `RevokedToken(reason=RENEWED)`，进入 **60 秒宽限期**；
    - 签发新 access token（新 `jti`）；
@@ -337,7 +341,7 @@ AuditLog / RevokedToken / BackofficeSession
 
 ### 4.3 禁用后的快速失效（P0-A-02 AC8 / AC11）
 
-access token 有效期 15 分钟 > 承诺的「禁用后 5 分钟内失效」，因此必须**主动撤销**，不能只靠过期：
+access token 有效期 3 天远大于承诺的「禁用后 5 分钟内失效」，因此必须**主动撤销**，不能只靠过期：
 
 **撤销事件 → 机制**：
 
@@ -417,7 +421,9 @@ access token 有效期 15 分钟 > 承诺的「禁用后 5 分钟内失效」，
 
 同一 `(keyId, fingerprint)` 重复激活时，服务端**不再保持旧令牌不变**，而是删除旧 `ClientCredential` 并签发全新凭据（新 `clientId` + 新 `refreshToken` + 新 `accessToken`）——即**每次激活都返回新的 `refreshToken`**。
 
-**目的**：客户端本地 `refreshToken` 丢失（且 `accessToken` 已过期、又未登出）时，凭本地缓存的密钥重新激活即可自助捞回令牌，无需等 24 小时凭据自然过期或找主管解绑。此前"凭据仍有效就不返还 refreshToken"的分支会令该场景陷入死锁。
+**目的**：客户端**不缓存明文密钥**（§9.3 第 1 条），本地 `refreshToken` 丢失后没有静默恢复路径，只能由用户重新输入密钥激活。此时若沿用旧逻辑「凭据仍有效就不返还 refreshToken」，会出现**用户已经重输了密钥、却仍拿不到 refreshToken** 的死锁——只能干等凭据自然过期或找主管解绑。改为每次激活都轮换签发后，用户一旦输入密钥必然拿到一组可用令牌。
+
+> 该改造在「客户端不缓存明文密钥」前提下**比原设计更必要**：原本客户端还能靠缓存的密钥自助捞回，现在激活是用户重输密钥后的唯一出口，绝不能返回空 refreshToken。
 
 **代价与客户端约定**（详见 §9.3 客户端令牌管理 checklist）：
 - **激活失去令牌级幂等**：重复激活令上一组令牌立即作废，客户端必须以本次响应的新令牌覆盖本地存储（绑定 `DeviceBinding` 仍幂等，不产生第二条）；
@@ -649,13 +655,14 @@ PRD 将 OQ-48 定为**产品决策**（「额度用完那一刻是所有 Key 一
 
 > 配合 §5.1.1「重新激活即令牌轮换」机制，客户端须遵循以下约定，避免死锁与令牌互相覆盖。
 
-1. **密钥与令牌分库存储**：密钥（license code）存 OS 钥匙串（macOS Keychain / Windows DPAPI），`accessToken` / `refreshToken` 可存普通应用存储。密钥耐久度须高于令牌——令牌丢失时密钥仍在，才能靠重激活自助捞回。
+1. **客户端不缓存明文密钥**：密钥（license code）仅在首次激活时由用户输入，校验通过即丢弃，**不做任何持久化**（内存、钥匙串、文件均不存）。因此 `refreshToken` 是**唯一的免密钥长期凭证**，须存 OS 钥匙串（macOS Keychain / Windows DPAPI）并持久化；`accessToken` 可存普通应用存储。
 2. **令牌按 keyId 分桶**：多密钥共存时本地存储为 `Map<keyId, { clientId, accessToken, refreshToken }>`，禁止单一全局槽位，否则激活 B 覆盖 A 的令牌导致 A 死锁。
-3. **日常续期走 /renew，激活仅作兜底**：`accessToken` 剩余 ≤ 1/3（5 分钟）时静默调 `/auth/renew`；仅当本地 `refreshToken` 缺失、或 `/renew` 连续失败（建议 ≥2 次）时，才用本地密钥调 `/activate` 兜底捞回令牌。**禁止周期性自动调激活**，避免与 renew 并发互踢。
+3. **日常续期走 /renew**：`accessToken` 剩余 ≤ 1/3（3 天即剩余 ≤ 1 天）时静默调 `/auth/renew`。`/renew` 返回 `AUTH_EXPIRED`（refresh 已过期）或 `CREDENTIAL_REVOKED`（凭据已失效）时，客户端**无法静默恢复**（不缓存密钥），须引导用户重新输入密钥调 `/activate`。**禁止周期性自动调激活**，避免与 renew 并发互踢。
 4. **激活响应以最后到达为准**：网络抖动导致激活重试时服务端会轮换多次，客户端拿到任一响应都应以**最后一个**覆盖本地令牌，丢弃先到的。
 5. **激活与 renew 不可并发**：两者均会令旧令牌作废，并发会导致在途 renew 401；客户端须串行调度（续期与兜底激活互斥）。
 6. **续期成功立即覆盖**：`/auth/renew` 返回的新 `refreshToken` 须立即覆盖本地旧值（旧的当场作废）。
 7. **登出后清本地**：`/auth/logout` 成功后客户端主动清掉本地 `accessToken` / `refreshToken` / `clientId`；下次使用须重新激活。
+8. **refreshToken 过期或丢失 = 必须重输密钥**：只要 14 天内联网续期过一次即可永久维持（滑动）；一旦超过 TTL 未续期，或本地 `refreshToken` 被清除（重装 App / 清数据 / 用户手动删除），客户端只能弹密钥输入框重新激活，服务端无法代为恢复。这是「不缓存明文密钥」的必然代价，也是 AC2 三个例外（解绑 / 禁用 / 团队到期）**之外刻意接受的第四种重输密钥场景**——若业务上要求彻底消除，可把 `REFRESH_TOKEN_TTL` 调到 90 天或更长（撤销能力不依赖它）。
 
 ---
 
@@ -713,8 +720,8 @@ platform:  teams CRUD(无删除)  /teams/:id/disable  /teams/:id/quotas
 
 | 变量 | 默认值 | 对应承诺/验收 |
 |------|--------|--------------|
-| `ACCESS_TOKEN_TTL` | 15 分钟 | P0-A-02 续期 |
-| `REFRESH_TOKEN_TTL` | 24 小时 | 客服无感知（P0-A-01 AC2） |
+| `ACCESS_TOKEN_TTL` | 3 天 | P0-A-02 续期 |
+| `REFRESH_TOKEN_TTL` | 14 天 | 客服无感知（P0-A-01 AC2）；客户端不缓存明文密钥，该值决定「多久不联网就要重输密钥」 |
 | `TOKEN_RENEW_GRACE_MS` | 60 秒 | 续期无缝轮换（P0-A-02 AC12） |
 | `KEY_STATUS_CACHE_TTL_MS` | 60 秒 | 禁用后 ≤5 分钟失效（P0-A-02 AC8） |
 | `RATE_LIMIT_TRANSLATE_CAP / RATE` | 20 / 20s | 单客户端限流（P0-A-02 AC10/AC11） |

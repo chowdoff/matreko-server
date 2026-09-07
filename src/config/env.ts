@@ -28,10 +28,15 @@ export const env = {
   databaseUrl: process.env.DATABASE_URL || 'file:./dev.db',
 
   // ── 认证（backend §12） ──
-  /** access token 有效期（毫秒），默认 15 分钟 */
-  accessTokenTtlMs: toInt(process.env.ACCESS_TOKEN_TTL, 15 * 60 * 1000, 'ACCESS_TOKEN_TTL'),
-  /** refresh token 有效期（毫秒），默认 24 小时 */
-  refreshTokenTtlMs: toInt(process.env.REFRESH_TOKEN_TTL, 24 * 60 * 60 * 1000, 'REFRESH_TOKEN_TTL'),
+  /** access token 有效期（毫秒），默认 3 天 */
+  accessTokenTtlMs: toInt(process.env.ACCESS_TOKEN_TTL, 3 * 24 * 60 * 60 * 1000, 'ACCESS_TOKEN_TTL'),
+  /**
+   * refresh token 有效期（毫秒），默认 14 天（每次续期滑动重置）。
+   * 客户端不缓存明文密钥，refreshToken 是唯一的免密钥凭证：
+   * 过期后客户端无法静默恢复，必须由用户重新输入密钥激活。
+   * 该 TTL 仅用于回收长期离线设备——撤销能力不依赖它（解绑/禁用/登出均为即时删凭据）。
+   */
+  refreshTokenTtlMs: toInt(process.env.REFRESH_TOKEN_TTL, 14 * 24 * 60 * 60 * 1000, 'REFRESH_TOKEN_TTL'),
   /** 续期无缝轮换宽限期（毫秒），默认 60 秒 */
   tokenRenewGraceMs: toInt(process.env.TOKEN_RENEW_GRACE_MS, 60 * 1000, 'TOKEN_RENEW_GRACE_MS'),
   /** 密钥/团队状态缓存 TTL（毫秒），默认 60 秒 */
