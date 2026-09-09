@@ -4,6 +4,10 @@ node_modules/
 # Build output
 dist/
 
+# Local API test files (contain server address and credentials, never commit)
+*.http
+*.rest
+
 # Environment
 .env
 
