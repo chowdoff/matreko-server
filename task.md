@@ -164,7 +164,9 @@ M0 工程基础
   - 生成密钥 `POST /api/supervisor/licenses`：格式 `MTRK-` + 4 组 × 4 位 Base32；库中存 `codeHash`(SHA-256) + `codePrefix`(前 6 位)；**明文仅本次响应返回一次**；默认 `multiDeviceEnabled=false`、`status=UNUSED`（AC1）。
   - 密钥列表 `GET /api/supervisor/licenses`：状态 / 创建时间 / 多开开关 / 绑定设备列表与激活时间（AC2）。
   - 禁用密钥 `POST /api/supervisor/licenses/:id/disable`：不可删除、只能禁用（AC8）；提交前返回影响范围提示（AC7）；禁用后触发凭据失效（配合 T1-04 的撤销机制）。
-  - 多开开关 `POST /api/supervisor/licenses/:id/multi-device`：开启上限 5 台（AC5）；**关闭时要求明确选择保留哪一台、下线哪些设备**，未选择不提交（AC9），下线设备走解绑流程（AC10）。
+  - 多开开关 `POST /api/supervisor/licenses/:id/multi-device`：开启上限 5 台（AC5）；**关闭时明确保留哪一台、下线哪些设备**，下线设备走解绑流程（AC10）。
+    - `keepDeviceBindingId` 的必填性由实际绑定数决定（AC9 原文只约束「已绑定多台设备」的密钥）：**已绑 0 台时无需该参数**，直接关闭；**已绑 1 台时省略则自动保留该设备**；已绑 ≥2 台时未选择不提交（400），指定 ID 不在当前绑定列表中返回「状态已变更」（409，AC12）。
+    - 该校验位于 service 层（schema 无法感知 DB 绑定数），schema 只做 `enabled: boolean` + `keepDeviceBindingId?: string(min 1)` 结构校验。
   - 设备解绑 `POST /api/supervisor/devices/:id/unbind`：删除 `DeviceBinding` + `ClientCredential` + jti 入撤销名单（AC4/AC11），无次数限制。
   - 并发保护：同一密钥的并发操作以服务端最终状态为准，后提交者返回「状态已变更」（AC12）。
 - **验收要点**：P0-B-09 AC1～AC13；密钥明文只出现在生成响应；同密钥并发「开启/关闭多开」「解绑」互斥不脏写。

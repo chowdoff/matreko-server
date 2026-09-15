@@ -714,6 +714,22 @@ platform:  teams CRUD(无删除)  /teams/:id/disable  /teams/:id/quotas
   /translation-keys  /translation-keys/:id  /engines/languages  /monitoring
 ```
 
+`POST /licenses/:id/multi-device` 请求体（P0-B-09 AC5/AC9/AC10/AC12）：
+
+```jsonc
+{ "enabled": true }                                              // 开启多开，上限 5 台
+{ "enabled": false }                                             // 关闭：已绑 0 台时无需该参数
+{ "enabled": false, "keepDeviceBindingId": "<DeviceBinding.id>" } // 关闭：保留指定设备，其余下线
+```
+
+| 关闭多开时的已绑数 | `keepDeviceBindingId` | 行为 |
+|---|---|---|
+| 0 台 | 不需要 | 200，直接关闭多开 |
+| 1 台 | 可省略 | 200，自动保留该设备 |
+| ≥2 台 | **必填** | 缺失 → 400 `PARAM_INVALID`；ID 不在当前绑定中 → 409 `STATUS_CHANGED`（AC12） |
+
+> 必填性取决于服务端实际绑定数，故校验落在 `licenseService.setMultiDevice` 而非 zod schema（schema 拿不到 DB 状态）。
+
 ---
 
 ## 12. 可配置项清单（全部环境变量，QA 可调）

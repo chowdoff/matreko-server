@@ -193,7 +193,12 @@ export class LicenseService {
 
   /**
    * 多开开关（P0-B-09 AC5/AC9/AC10）：
-   * 开启后最多绑定 5 台；关闭时必须选择保留一台，其余设备自动按解绑流程下线。
+   * 开启后最多绑定 5 台；关闭时保留一台，其余设备自动按解绑流程下线。
+   *
+   * 关闭时 `keepDeviceBindingId` 的必填性由实际绑定数决定（AC9 只约束「已绑定多台设备」）：
+   * - 已绑 0 台：无需该参数，直接关闭多开；
+   * - 已绑 1 台：无选择余地，未显式指定则自动保留该设备；
+   * - 已绑 ≥2 台：必须显式指定，否则 400；指定的 ID 不在当前绑定列表中则 409（AC12）。
    */
   async setMultiDevice(
     licenseId: string,
@@ -226,6 +231,7 @@ export class LicenseService {
     // 关闭多开（AC9：未选择保留设备不提交）
     if (!key.multiDeviceEnabled) return { multiDeviceEnabled: false };
 
+    // 已绑 0 台：没有设备需要选择保留，直接关闭即可
     const bindings = key.deviceBindings;
     if (bindings.length === 0) {
       await prisma.licenseKey.update({
@@ -241,7 +247,17 @@ export class LicenseService {
       return { multiDeviceEnabled: false };
     }
 
-    const keepId = input.keepDeviceBindingId!;
+    // AC9：已绑 ≥1 台时才需要确定保留设备。
+    // 仅 1 台时无选择余地，未显式指定则自动保留；≥2 台时必须由调用方指定。
+    const keepId =
+      input.keepDeviceBindingId ??
+      (bindings.length === 1 ? bindings[0].id : undefined);
+    if (!keepId) {
+      throw AppError.badRequest('关闭多开时必须选择保留哪一台设备', {
+        fieldErrors: { keepDeviceBindingId: ['关闭多开时必须选择保留哪一台设备'] },
+      });
+    }
+
     const keep = bindings.find((b) => b.id === keepId);
     if (!keep) {
       // AC12：并发操作后设备列表已变化

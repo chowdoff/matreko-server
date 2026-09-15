@@ -191,8 +191,11 @@ licenseRouter.post(
  *     summary: 多开开关（P0-B-09 AC5/AC9/AC10）
  *     description: >
  *       开启多开后最多绑定 5 台设备；
- *       关闭多开时必须指定 keepDeviceBindingId 选择保留哪一台，其余设备自动按解绑流程下线（AC9/AC10）；
- *       并发操作后设备列表已变化时返回 409「状态已变更」（AC12）。
+ *       关闭多开时保留一台，其余设备自动按解绑流程下线（AC9/AC10）。
+ *       keepDeviceBindingId 的必填性取决于实际绑定数：
+ *       已绑 0 台时无需该参数（AC9 只约束「已绑定多台设备」的场景）；
+ *       已绑 1 台时未指定则自动保留该设备；已绑 ≥2 台时必须指定，否则 400；
+ *       指定的 ID 不在当前绑定列表中时返回 409「状态已变更」（AC12）。
  *     security:
  *       - bearerAuth: []
  *     parameters:

@@ -377,7 +377,9 @@ const options: swaggerJsdoc.Options = {
             enabled: { type: 'boolean', description: 'true 开启多开（上限 5 台）；false 关闭多开' },
             keepDeviceBindingId: {
               type: 'string',
-              description: '关闭多开时必须指定保留的设备绑定 ID（未选择不提交，AC9）',
+              description:
+                '关闭多开时保留的设备绑定 ID（AC9）。仅在已绑 ≥2 台时必填；' +
+                '已绑 0 台时无需提交，已绑 1 台时省略则自动保留该设备',
             },
           },
         },
