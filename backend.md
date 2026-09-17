@@ -144,7 +144,7 @@ AuditLog / RevokedToken / BackofficeSession
 | id | String (cuid) | 主键 |
 | keyId | String | 所属密钥 |
 | deviceFingerprintHash | String | 绑定指纹（校验用） |
-| clientId | String (unique) | 客户端实例标识（限流维度 key） |
+| clientId | String (unique) | 客户端实例标识（限流维度 key）；由 `(keyId, 设备指纹)` 确定性派生，同一设备恒定不变，见 §5.1.2 |
 | refreshTokenHash | String (unique) | refresh token 哈希 |
 | expiresAt | DateTime | 过期时刻（滑动续期） |
 | createdAt / lastRenewedAt | DateTime | 创建 / 最近续期 |
@@ -414,12 +414,13 @@ access token 有效期 3 天远大于承诺的「禁用后 5 分钟内失效」�
      - 未开启多开：已有绑定 → 失败「该密钥已在其他设备激活」
      - 开启多开：绑定数 ≥ 5 → 失败「已达设备数上限 5 台」
      - 剩余名额 > 0 → 创建 DeviceBinding
-  ④ 签发 clientId + ClientCredential(refresh) + access token
+  ④ 签发 clientId（按 (keyId, 指纹) 稳定派生，§5.1.2）+ ClientCredential(refresh) + access token
 ```
 
 ### 5.1.1 重新激活即令牌轮换（2026-09-01 调整）
 
-同一 `(keyId, fingerprint)` 重复激活时，服务端**不再保持旧令牌不变**，而是删除旧 `ClientCredential` 并签发全新凭据（新 `clientId` + 新 `refreshToken` + 新 `accessToken`）——即**每次激活都返回新的 `refreshToken`**。
+同一 `(keyId, fingerprint)` 重复激活时，服务端**不再保持旧令牌不变**，而是删除旧 `ClientCredential` 并签发全新令牌（新 `refreshToken` + 新 `accessToken`）——即**每次激活都返回新的 `refreshToken`**。
+> `clientId` **不参与轮换**，同一设备恒定不变，见 §5.1.2。
 
 **目的**：客户端**不缓存明文密钥**（§9.3 第 1 条），本地 `refreshToken` 丢失后没有静默恢复路径，只能由用户重新输入密钥激活。此时若沿用旧逻辑「凭据仍有效就不返还 refreshToken」，会出现**用户已经重输了密钥、却仍拿不到 refreshToken** 的死锁——只能干等凭据自然过期或找主管解绑。改为每次激活都轮换签发后，用户一旦输入密钥必然拿到一组可用令牌。
 
@@ -429,6 +430,31 @@ access token 有效期 3 天远大于承诺的「禁用后 5 分钟内失效」�
 - **激活失去令牌级幂等**：重复激活令上一组令牌立即作废，客户端必须以本次响应的新令牌覆盖本地存储（绑定 `DeviceBinding` 仍幂等，不产生第二条）；
 - **激活与续期不可并发**：`/auth/renew` 与 `/activate` 同时调用会导致 renew 命中"凭据已失效"（旧凭据被激活删除），客户端须串行——日常续期走 `/renew`，仅在本地 `refreshToken` 丢失 / `/renew` 连续失败时才触发激活兜底；
 - 激活接口限流（§4.5，5/1s）已覆盖防滥用；同机多实例互踢由"激活仅作兜底、不周期触发"规避。
+
+### 5.1.2 clientId 稳定派生（2026-09-17 调整）
+
+**契约**：`clientId` 是**设备身份**而非会话标识——**同一设备指纹 + 同一密钥，任意次数重复激活，`/activate` 返回的 `clientId` 必须完全一致**；轮换的只是 `refreshToken` / `accessToken`。
+
+```
+clientId = "cli_" + base64url( HMAC-SHA256(CLIENT_ID_SECRET,
+                     "client-id:v1:" + keyId + ":" + fingerprintHash ) )[0:16]
+                                                 ↑ SHA-256(fingerprint + ":" + keyId)
+```
+
+| 性质 | 说明 |
+|------|------|
+| 确定性 | 纯函数，只依赖 `(keyId, fingerprintHash)` 与服务端私钥；**与库中是否残留旧 `ClientCredential` 无关**——解绑、禁用密钥清理凭据、凭据自然过期后重新激活，仍得同一 `clientId` |
+| 唯一性 | 输入含 `keyId` → 同机用不同密钥激活得到不同 `clientId`；不同设备指纹 128 bit 碰撞概率可忽略，满足 `clientId @unique` |
+| 不可猜 | HMAC 密钥为服务端私钥，客户端/主管端均无法推导他人 `clientId` |
+| 长度兼容 | 与旧随机实现同为 `cli_` + 22 字符，前端解析无需改动 |
+
+**为什么不能只是"复用库中已有记录的 clientId"**：`ClientCredential` 会在解绑（§5.4）、禁用密钥（§5.2 关联清理）、登出、过期回收等场景被删除，此时库中无记录可复用 → 重新激活又会生成新 `clientId`，仍不满足"重复激活一致"。派生法不依赖任何库状态，故是唯一稳健实现。
+
+**派生密钥**：环境变量 `CLIENT_ID_SECRET`；未配置时回落 `JWT_SECRET`（存量部署零配置生效）。⚠️ 同一部署内必须恒定——变更该值等价于"所有设备身份重置"，会导致同一设备重新激活后 `clientId` 变化。
+
+**顺带修好的历史问题**（旧随机 `clientId` 的副作用，现已消除）：
+- `PortLease.clientId`、`TranslationUsageLog`、客户端仪表板、`AuditLog.actorId` 均以 `clientId` 归属。旧实现下重新激活换 `clientId`，会把旧 `clientId` 名下的端口租约变成"孤儿租约"（心跳用新 `clientId` 刷新不到，只能等 24h TTL 回收）并导致主管端同一设备出现两条不同标识的记录；
+- 按 `clientId` 维度的限流桶在重新激活后不再被重置（同一设备沿用同一桶，符合"限流针对设备而非会话"的语义）。
 
 ### 5.2 密钥明文策略
 
@@ -653,7 +679,7 @@ PRD 将 OQ-48 定为**产品决策**（「额度用完那一刻是所有 Key 一
 
 ### 9.3 客户端令牌管理 checklist（2026-09-01 增补）
 
-> 配合 §5.1.1「重新激活即令牌轮换」机制，客户端须遵循以下约定，避免死锁与令牌互相覆盖。
+> 配合 §5.1.1「重新激活即令牌轮换」与 §5.1.2「clientId 稳定派生」机制，客户端须遵循以下约定，避免死锁与令牌互相覆盖。
 
 1. **客户端不缓存明文密钥**：密钥（license code）仅在首次激活时由用户输入，校验通过即丢弃，**不做任何持久化**（内存、钥匙串、文件均不存）。因此 `refreshToken` 是**唯一的免密钥长期凭证**，须存 OS 钥匙串（macOS Keychain / Windows DPAPI）并持久化；`accessToken` 可存普通应用存储。
 2. **令牌按 keyId 分桶**：多密钥共存时本地存储为 `Map<keyId, { clientId, accessToken, refreshToken }>`，禁止单一全局槽位，否则激活 B 覆盖 A 的令牌导致 A 死锁。
@@ -663,6 +689,7 @@ PRD 将 OQ-48 定为**产品决策**（「额度用完那一刻是所有 Key 一
 6. **续期成功立即覆盖**：`/auth/renew` 返回的新 `refreshToken` 须立即覆盖本地旧值（旧的当场作废）。
 7. **登出后清本地**：`/auth/logout` 成功后客户端主动清掉本地 `accessToken` / `refreshToken` / `clientId`；下次使用须重新激活。
 8. **refreshToken 过期或丢失 = 必须重输密钥**：只要 14 天内联网续期过一次即可永久维持（滑动）；一旦超过 TTL 未续期，或本地 `refreshToken` 被清除（重装 App / 清数据 / 用户手动删除），客户端只能弹密钥输入框重新激活，服务端无法代为恢复。这是「不缓存明文密钥」的必然代价，也是 AC2 三个例外（解绑 / 禁用 / 团队到期）**之外刻意接受的第四种重输密钥场景**——若业务上要求彻底消除，可把 `REFRESH_TOKEN_TTL` 调到 90 天或更长（撤销能力不依赖它）。
+9. **`clientId` 是设备身份，不是会话标识**（2026-09-17 增补，§5.1.2）：同一设备 + 同一密钥，重新激活拿到的 `clientId` **与上次完全相同**。客户端因此**不得**用"`clientId` 变化"来判断"是否换了令牌/是否是新会话"——判断会话更新一律以 `refreshToken` / `accessToken` 变化为准；`clientId` 可直接作为本地设备唯一键（用于端口租约、用量归属、埋点关联）。仅在换密钥、改硬件指纹或服务端更换 `CLIENT_ID_SECRET` 时才会变。
 
 ---
 
@@ -751,6 +778,7 @@ platform:  teams CRUD(无删除)  /teams/:id/disable  /teams/:id/quotas
 | `LANG_SYNC_CRON` | `0 4 * * *` | 语种清单同步 |
 | `PLATFORM_EMAIL / PLATFORM_INITIAL_PASSWORD` | — | 管理员初始化（P0-A-19 AC1） |
 | `API_KEY_ENC_KEY` | — | API Key 加密 |
+| `CLIENT_ID_SECRET` | 回落 `JWT_SECRET` | clientId 派生 HMAC 密钥（§5.1.2）；**同一部署内必须恒定**，变更将使全部设备身份重置 |
 | `LOGIN_LOCK_THRESHOLD / LOGIN_LOCK_MS` | 10 / 30 分钟 | P0-A-19 AC7 |
 
 ---
@@ -768,6 +796,7 @@ platform:  teams CRUD(无删除)  /teams/:id/disable  /teams/:id/quotas
 | 配额变更 ≤1min 生效 | §8.2 缓存失效 | 测试：调配额后立即生效 |
 | 计量口径 | §8.1 | 测试：失败/跳过/重试成功/撤回后成功四种情形 |
 | 并发激活不超卖 | §5.3 行锁 + 唯一约束 | 测试：并发抢占最后一名额 |
+| 同设备重复激活身份稳定 | §5.1.2 clientId 稳定派生 | 测试：同 `code` + 同指纹激活两次，断言两次 `clientId` 完全相等（含解绑后重新激活） |
 | 端口防超卖 | §6.1 acquire 事务 | 测试：并发申请至配额上限 |
 
 ---

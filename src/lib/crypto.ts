@@ -22,6 +22,26 @@ export function hashFingerprint(fingerprint: string, keyId: string): string {
   return sha256(`${fingerprint}:${keyId}`);
 }
 
+/**
+ * clientId 稳定派生（backend §5.1.2）：
+ * `cli_` + base64url(HMAC-SHA256(secret, `client-id:v1:${keyId}:${fingerprintHash}`)) 前 16 字节。
+ *
+ * 设计要点：
+ * - **确定性**：同一 `(keyId, fingerprintHash)` 恒得同一 clientId，与激活次数、凭据轮换、
+ *   解绑/禁用导致凭据被清空与否**均无关**（纯函数，不依赖库中是否残留旧记录）；
+ * - **唯一性**：输入含 keyId，故同一台设备用不同密钥激活得到不同 clientId；
+ *   不同设备指纹（>128 bit 熵）碰撞概率可忽略，满足 `ClientCredential.clientId @unique`；
+ * - **不可猜**：HMAC 密钥为服务端私钥（`CLIENT_ID_SECRET`），客户端无法自行推导他人 clientId；
+ * - **长度兼容**：输出与旧随机实现同为 `cli_` + 22 字符，前端无需改动解析逻辑。
+ */
+export function deriveClientId(keyId: string, fingerprintHash: string, secret: string): string {
+  const mac = crypto
+    .createHmac('sha256', secret)
+    .update(`client-id:v1:${keyId}:${fingerprintHash}`)
+    .digest();
+  return `cli_${mac.subarray(0, 16).toString('base64url')}`;
+}
+
 /** 生成 N 字节安全随机串（Base64url，不含 `=`） */
 export function randomToken(bytes = 32): string {
   return crypto.randomBytes(bytes).toString('base64url');

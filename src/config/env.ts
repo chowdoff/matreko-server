@@ -75,4 +75,11 @@ export const env = {
   jwtSecret: requireEnv('JWT_SECRET'),
   /** 密钥码 AES-256-GCM 加解密主密钥（32 字节 base64） */
   licenseCodeEncKey: requireEnv('LICENSE_CODE_ENC_KEY'),
+
+  /**
+   * clientId 派生密钥（HMAC key，backend §5.1.2）。
+   * 未配置 `CLIENT_ID_SECRET` 时回落 `JWT_SECRET`，保证存量部署无需新增配置即可生效。
+   * ⚠️ 该值在**同一部署内必须恒定**：变更会导致同一设备重新激活时得到新的 clientId。
+   */
+  clientIdSecret: (process.env.CLIENT_ID_SECRET || requireEnv('JWT_SECRET')).trim(),
 } as const;

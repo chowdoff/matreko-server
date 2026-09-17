@@ -1,6 +1,13 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
-import { sha256, hashFingerprint, generateSecret, randomToken, tryDecryptLicenseCode } from '@/lib/crypto';
+import {
+  sha256,
+  hashFingerprint,
+  generateSecret,
+  randomToken,
+  tryDecryptLicenseCode,
+  deriveClientId,
+} from '@/lib/crypto';
 import { signClientAccessToken } from '@/lib/jwt';
 import { env } from '@/config/env';
 import { AppError } from '@/utils/AppError';
@@ -153,7 +160,14 @@ export class ActivateService {
     });
   }
 
-  /** 签发 clientId + refresh token + access token 并在事务内写审计（正常激活与补发共用） */
+  /**
+   * 签发 clientId + refresh token + access token 并在事务内写审计（正常激活与补发共用）。
+   *
+   * clientId 由 `(keyId, fingerprintHash)` **确定性派生**（backend §5.1.2）：
+   * 同一设备指纹 + 同一密钥重复激活时返回**完全相同**的 clientId，
+   * 只有 refreshToken / accessToken 轮换——clientId 是"设备身份"，令牌是"会话"。
+   * 该性质也与库中旧记录是否被清空无关（解绑/禁用/概览清理后重新激活仍得同一 clientId）。
+   */
   private async issueCredential(
     tx: Prisma.TransactionClient,
     keyId: string,
@@ -162,7 +176,7 @@ export class ActivateService {
     ip: string | undefined,
     reissued: boolean,
   ) {
-    const clientId = `cli_${randomToken(16)}`;
+    const clientId = deriveClientId(keyId, fingerprintHash, env.clientIdSecret);
     const refreshToken = generateSecret();
     const jti = randomToken(16);
     const refreshTokenHash = sha256(refreshToken);
