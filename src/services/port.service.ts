@@ -5,6 +5,7 @@ import { writeAuditLog, AuditAction } from '@/services/audit.service';
 import { tryDecryptLicenseCode } from '@/lib/crypto';
 import { normalizeChannelAccountId, normalizeChannel } from '@/lib/channelAccountKey';
 import { env } from '@/config/env';
+import type { ProxyProtocolValue } from '@/schemas/channelAccount.schema';
 
 /** 时区标注（PRD §2.6） */
 const TIMEZONE = 'Asia/Shanghai';
@@ -558,6 +559,38 @@ export class PortService {
     const offlineThresholdMs = env.onlineWindowMs;
     const stuckThresholdMs = 60 * 60 * 1000;
 
+    /**
+     * 代理出口取自「渠道账号登记表」（唯一真相源）。
+     * 历史实现把展示串冗余存在租约 `PortLease.proxyExit` 上且全仓无写入点，
+     * 已删除该列；此处按 (clientId, channelAccountId) 回表取结构化代理字段。
+     */
+    const accountRefs = leases
+      .map((l) => ({
+        clientId: l.clientId,
+        channelAccountId: normalizeChannelAccountId(l.channelAccountKey, l.channelAccountId),
+      }))
+      .filter((r): r is { clientId: string; channelAccountId: string } => !!r.channelAccountId);
+    const accounts =
+      accountRefs.length > 0
+        ? await prisma.channelAccount.findMany({
+            where: {
+              teamId,
+              deletedAt: null,
+              OR: accountRefs.map((r) => ({
+                clientId: r.clientId,
+                channelAccountId: r.channelAccountId,
+              })),
+            },
+            select: {
+              clientId: true,
+              channelAccountId: true,
+              proxyProtocol: true,
+              proxyRegion: true,
+            },
+          })
+        : [];
+    const accountMap = new Map(accounts.map((a) => [`${a.clientId}\u0000${a.channelAccountId}`, a]));
+
     // 离线仍占用：5 分钟未上报但尚不足 60 分钟（未达卡死阈值）
     const offlineLeases = leases.filter((l) => {
       const age = now - l.lastSeenAt.getTime();
@@ -586,6 +619,10 @@ export class PortService {
       else if (l.channelStatus === 'ONLINE') accountStatus = 'ONLINE';
       else accountStatus = seenMs <= offlineThresholdMs ? 'ONLINE' : 'OFFLINE';
 
+      const accountId = normalizeChannelAccountId(l.channelAccountKey, l.channelAccountId);
+      const account = accountId ? accountMap.get(`${l.clientId}\u0000${accountId}`) : undefined;
+      const proxyProtocol = (account?.proxyProtocol as ProxyProtocolValue | null) ?? null;
+
       return {
         leaseId: l.id,
         keyId: l.keyId,
@@ -598,7 +635,9 @@ export class PortService {
         acquiredAt: l.acquiredAt.toISOString(),
         lastSeenAt: l.lastSeenAt.toISOString(),
         lastSeenRelative: formatRelative(l.lastSeenAt),
-        proxyExit: l.proxyExit ?? '',
+        // 代理出口（结构化）：展示串由前端拼（如 SOCKS5·新加坡 / 直连）
+        proxyProtocol,
+        proxyRegion: proxyProtocol === 'DIRECT' ? null : (account?.proxyRegion ?? null),
         canRelease: true,
       };
     });

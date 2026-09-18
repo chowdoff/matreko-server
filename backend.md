@@ -166,15 +166,18 @@ AuditLog / RevokedToken / BackofficeSession
 | acquiredAt | DateTime | 占用时刻 |
 | lastSeenAt | DateTime | 最近一次在线证明时刻 |
 | releasedAt | DateTime? | 释放时刻 |
-| proxyExit | String? | 代理出口展示信息（仅展示用途） |
 | channelStatus | String? | 客户端上报的渠道业务状态（ONLINE / WAITING_QR / OFFLINE，仅展示用途） |
 
 **服务端记录为准**（PRD P0-C-20）。回收 = 置 `RELEASED`（不物理删除，保留审计）。
 索引 `(clientId, channelAccountId)`（与登记表匹配用）。
 
+> 历史字段 `proxyExit`（代理出口展示串）**已于 2026-09-18 删除**：它在全仓没有任何写入点（前端也从未渲染），
+> 属"设计与实现脱节"的死字段；代理出口改为登记表的两个结构化字段（见下），端口占用页按
+> `(clientId, channelAccountId)` 回表取。
+
 #### ChannelAccount 渠道账号登记（P0-C-03 AC1 / P0-B-10 AC1）
 
-> **只登记存在性元数据**：渠道、别名、归属。代理 / 指纹 / 数据目录等**配置内容仍只存客户端本地**，不违反 P0-C-18 AC18「各设备账号配置互相独立、不做同步」。与 §3.3 B 是两张不同的表，请勿混淆（区别见 §3.3 末尾）。
+> **只登记存在性元数据**：渠道、别名、归属、**代理出口摘要**。代理凭据（host/port/账号密码）、指纹、数据目录等**配置内容仍只存客户端本地**，不违反 P0-C-18 AC18「各设备账号配置互相独立、不做同步」。与 §3.3 B 是两张不同的表，请勿混淆（区别见 §3.3 末尾）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -185,9 +188,21 @@ AuditLog / RevokedToken / BackofficeSession
 | channelAccountId | String | 客户端侧稳定标识（客户端本地 `port.id`，**单机内唯一**） |
 | channel | Enum (TELEGRAM / WHATSAPP) | 渠道 |
 | accountName | String | 客服自定义别名（P0-C-18「账号名称」，≤ 64 字符） |
-| createdAt | DateTime | 账号**添加**时刻（主管端「添加时间」列） |
+| proxyProtocol | Enum (SOCKS5 / HTTP / HTTPS / DIRECT)? | 代理协议；null = 客户端尚未上报，`DIRECT` = 显式本机直连 |
+| proxyRegion | String? | 出口地区码 ISO 3166-1 alpha-2 大写（`SG` / `HK`）；`DIRECT` 或出口地未知（AC12）为 null |
+| createdAt | DateTime | 账号**添加**时刻 |
 | updatedAt | DateTime | 最近变更时刻 |
 | deletedAt | DateTime? | 软删除（P0-C-18 AC15 删除账号配置）；主管端默认不展示 |
+
+**代理出口为何拆两个字段、而不是存 `SOCKS5·新加坡` 整串**（2026-09-18 定稿）：
+
+| 维度 | 存整串 | 存「协议 + 地区码」（采用） |
+|---|---|---|
+| 展示格式/语言变化 | 改分隔符或改中英文名 = 数据迁移 | 改前端映射即可，库不动 |
+| 按地区/协议筛选统计 | 只能 `LIKE '%香港%'` 模糊匹配 | `where` / `groupBy` 精确可用 |
+| 客户端上报校验 | 各种写法（`socks5·新加坡` / `新加坡 socks5`）都会落库 | 协议走枚举、地区码走正则，脏数据进不来 |
+| 多语言 | 中文名写死在库里 | 存码，展示层可本地化 |
+| 存储成本 | 几乎相同 | 几乎相同 |
 
 - 唯一约束 `(clientId, channelAccountId)`：AC18 明确多设备配置互相独立 → `channelAccountId` 只单机唯一，用 `(keyId, …)` 会在同密钥多开时误撞。
 - 用 `clientId` 而非指纹哈希：正因为 clientId 已确定性派生，登记记录不会因重新激活而"换主人"。
@@ -319,11 +334,15 @@ AuditLog / RevokedToken / BackofficeSession
 | | §3.3 B「账号配置（本地账号配置库）」 | §3.2「ChannelAccount 登记表」 |
 |---|---|---|
 | 定位 | 客户端**本地**库字段契约 | 服务端**登记**表 |
-| 存什么 | `proxy_config` / `fingerprint_config` / `data_dir` + 同步预留字段 | 仅 `channel` / `accountName` / 归属 |
+| 存什么 | `proxy_config` / `fingerprint_config` / `data_dir` + 同步预留字段 | 仅 `channel` / `accountName` / 归属 + **代理出口摘要**（协议 + 地区码，不含代理凭据） |
 | v1.0 | 只写默认值，**不参与业务逻辑** | **参与业务**（主管端账号列表的唯一数据源） |
 | 未来 | 同步上线时按该契约建云端表（**另一张表**，非本表扩列） | 不变 |
 
 > PRD 未要求同步代理 / 指纹，且 P0-C-18 AC18 明确"不做同步"。登记表不触碰本节的配置同步契约，只补上 PRD 已要求、但此前实现缺失的"账号**存在性**"这一层。
+>
+> **代理出口摘要的边界（2026-09-18 明确）**：登记表只存 `proxyProtocol` + `proxyRegion`（"走的什么协议、从哪个地区出网"），
+> 用于主管端展示与 P0-C-18 AC4/AC11 的地区一致性核对；**代理 host / port / 账号密码一律不上报**。
+> 这两个字段不构成"配置同步"——拿到它们无法复现代理，也不违反 AC18。
 
 ---
 
@@ -591,6 +610,20 @@ clientId = "cli_" + base64url( HMAC-SHA256(CLIENT_ID_SECRET,
 
 **主管端数据源**：`channel_accounts`（主，`deletedAt IS NULL`）LEFT JOIN 当前 HELD 租约（运行态），按 `(clientId, channelAccountId)` 匹配。
 
+**账号列表字段（P0-B-10 AC1，2026-09-18 定稿列序）**：账号名称 → 渠道 → 状态 → 占用端口数 → 所属密钥/客服 → 代理出口 → 本次启动时间。
+
+| 列 | 响应字段 | 说明 |
+|---|---|---|
+| 账号名称 | `accountName` | 单元格 tooltip 附带 `channelAccountKey` + `clientId`（原独立的「设备」列并入 tooltip，避免多设备同名账号无法区分） |
+| 渠道 | `channel` | TELEGRAM / WHATSAPP |
+| 状态 | `status` | 四态，见上表 |
+| 占用端口数 | `portsHeld` | 0 或 1（一个账号至多占一个端口） |
+| 所属密钥/客服 | `licenseCode` + `keyNickname` | **两行单元格**：上行密钥明文（AES-256-GCM 解密后返回，解密失败为 null）；下行客服名称（= 密钥昵称） |
+| 代理出口 | `proxyProtocol` + `proxyRegion` | 结构化两字段，**展示串由前端拼**（`SOCKS5·新加坡` / `直连` / 出口地未知时只显示协议） |
+| 本次启动时间 | `acquiredAt` | 当前 HELD 租约的占用时刻；未启动为 null |
+
+> 响应不再包含 `proxyExit`（旧展示串字段已删除，见 §3.2）。`createdAt` / `lastSeenAt` / `clientId` 等字段仍保留返回，供客户端自检与 tooltip 使用。
+
 **在线判定窗口统一（顺带修复）**：新增 `ONLINE_WINDOW`（默认 5 分钟），作为三处消费方（IM 账号列表 / 端口管理 / 客户端仪表板）的**唯一**在线阈值。
 
 > 修复前 IM 账号页硬编码 **60 秒**，小于心跳间隔 2 分钟 → 健康账号在两次心跳之间**必然**被判离线；且同一账号在端口管理页（5 分钟）与 IM 账号页（60 秒）会显示不同状态。现统一为 `env.onlineWindowMs`。
@@ -599,7 +632,7 @@ clientId = "cli_" + base64url( HMAC-SHA256(CLIENT_ID_SECRET,
 
 | 路径 | 接口 | 说明 |
 |---|---|---|
-| ① 全量对账（主） | `PUT /api/client/accounts` | 客户端提交本机全部未删除账号快照；服务端事务内 upsert + 软删；幂等可重放，漏报自愈 |
+| ① 全量对账（主） | `PUT /api/client/accounts` | 客户端提交本机全部未删除账号快照；服务端事务内 upsert + 软删；幂等可重放，漏报自愈。入参每项：`channelAccountId` / `channel` / `accountName` + **可选** `proxyProtocol` / `proxyRegion`（省略 = 不上报，服务端保留原值，兼容老客户端；`DIRECT` 禁止携带 `proxyRegion`） |
 | ② 启动补登（过渡兜底） | `POST /api/client/ports/acquire` | 客户端尚未接入①时，启动动作即登记（别名退化为标识本身，待①覆盖） |
 | ③ 历史回填（一次性） | `scripts/backfill-channel-accounts.ts` | 从存量 `port_leases` 提取账号，幂等；渠道不可判定者跳过并打印清单 |
 
@@ -907,6 +940,8 @@ platform:  teams CRUD(无删除)  /teams/:id/disable  /teams/:id/quotas
 | **已添加的渠道账号可见**（P0-B-10 AC1） | §6.3 `channel_accounts` + `PUT /api/client/accounts` | 测试：添加 3 个账号（1 启动 + 2 从未启动）→ 主管端 `total=3`、`notStarted=2`，未启动账号 `status=NOT_STARTED` / `leaseId=null` |
 | 账号配置可删除且不重复追加（P0-C-18 AC15/AC20） | §6.3 快照对账 + 软删复位 | 测试：快照移除后 `deleted=1`；重新添加后 `updated=1`、库中仍只有 1 行 |
 | 对账幂等 | §6.3 事务内 diff | 测试：重复提交同一快照 → `created=updated=deleted=0` |
+| **所属密钥/客服字段**（P0-B-10 AC1） | §6.3 `licenseCode` + `keyNickname` | 测试：列表项 `licenseCode` 以 `MTRK-` 开头（AES 解密成功）、`keyNickname` 等于创建密钥时的昵称 |
+| **代理出口结构化**（P0-B-10 AC1 / P0-C-18） | §3.2 `proxyProtocol` + `proxyRegion` | 测试：上报 `SOCKS5`+`SG` → 列表返回同值且**不含**旧字段 `proxyExit`；`DIRECT` → `region=null`（库里也清空）；省略两字段的上报**不覆盖**原值；`DIRECT` 带 region / 非法协议 / 小写地区码 → 400 |
 | 在线判定不误判 | §6.3 `ONLINE_WINDOW` 统一 | 测试：`lastSeenAt` 置 3 分钟前仍判 `ONLINE`（旧实现 60s 会误判 `OFFLINE`） |
 | 渠道状态越权防护 | §6.3 心跳归属校验 | 测试：设备 B 上报设备 A 的 leaseId → `channelStatusUpdated=0` 且 A 的状态未被篡改 |
 | 设备不再假离线 | §6.3 心跳保活 `lastActiveAt` | 测试：激活后把 `lastActiveAt` 置 6 分钟前 → 设备管理页判 `OFFLINE`；再调一次心跳 → 立即恢复 `ONLINE` 且 `lastSeenSource=HEARTBEAT` |

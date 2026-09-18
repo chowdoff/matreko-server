@@ -1,9 +1,13 @@
 #!/bin/bash
 # 渠道账号登记 + 主管端账号列表 回归验证
-#   PRD：P0-C-03 AC1、P0-C-18 AC1/AC15/AC18/AC20、P0-B-10 AC1
+#   PRD：P0-C-03 AC1、P0-C-18 AC1/AC12/AC15/AC18/AC20、P0-B-10 AC1
 #   设计：channel-account-design.md
-# 另含第 10 段：设备在线判据（心跳保活 lastActiveAt）回归
-#   契约：client-keepalive-contract.md；后端说明：backend.md §6.3
+# 分段：
+#   1~9   登记/对账/软删复活/幂等/越权/入参校验
+#   3.1   新列字段：所属密钥（明文）+ 客服名称 + 代理出口（协议+地区码）
+#   8.1   代理出口字段语义：变更生效 / 省略不覆盖 / DIRECT 清空地区
+#   10    设备在线判据（心跳保活 lastActiveAt）回归
+#        契约：client-keepalive-contract.md；后端说明：backend.md §6.3
 #
 # 前置：在**隔离库**上启动服务（避免污染 dev.db）：
 #   cp prisma/dev.db /tmp/ca-verify.db
@@ -76,9 +80,9 @@ echo "═══ 2. 全量对账：3 个账号（1 已启动 + 2 从未启动） 
 SYNC=$(req -X PUT "$BASE/api/client/accounts" \
   -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
   -d "{\"accounts\":[
-        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\"},
-        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\"},
-        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\"}
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\",\"proxyProtocol\":\"SOCKS5\",\"proxyRegion\":\"SG\"},
+        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\",\"proxyProtocol\":\"HTTP\",\"proxyRegion\":\"HK\"}
       ]}")
 check_eq "2" "$(echo "$SYNC" | dget "d['created']")" "created（A 已存在→更新；B/C 新建）"
 check_eq "1" "$(echo "$SYNC" | dget "d['updated']")" "updated（A 别名被真实名称覆盖）"
@@ -110,13 +114,45 @@ sys.exit(0 if ok else 3)
 " || FAILED=$((FAILED + 1))
 
 echo ""
-echo "═══ 4. 幂等：重复提交同一快照 ═══"
+echo "═══ 3.1 「所属密钥/客服」+「代理出口」字段（P0-B-10 AC1 新列） ═══"
+# 用 here-doc（引号定界符）传 python：避免 bash 双层转义 + 中文在命令行上被破坏
+echo "$L2" > /tmp/ka-accounts-list.json
+python3 - "$ACC_A" "$ACC_B" "$ACC_C" "$TS" <<'PY' || FAILED=$((FAILED + 1))
+import json, sys
+a_id, b_id, c_id, ts = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+items = json.load(open('/tmp/ka-accounts-list.json'))['data']['items']
+by = {i['channelAccountId']: i for i in items}
+a, b, c = by.get(a_id, {}), by.get(b_id, {}), by.get(c_id, {})
+problems = []
+
+# 所属密钥：AES 解密的密钥明文 + 客服名称（= 密钥昵称）
+if not (a.get('licenseCode') or '').startswith('MTRK-'):
+    problems.append('A.licenseCode 应为 MTRK- 开头的密钥明文，实际 %r' % a.get('licenseCode'))
+if a.get('keyNickname') != 'ca密钥' + ts:
+    problems.append('A.keyNickname 应为 ca密钥%s，实际 %r' % (ts, a.get('keyNickname')))
+
+# 代理出口：结构化两字段（协议 + ISO 地区码），而非展示串
+if a.get('proxyProtocol') != 'SOCKS5' or a.get('proxyRegion') != 'SG':
+    problems.append('A 应为 SOCKS5/SG，实际 %r/%r' % (a.get('proxyProtocol'), a.get('proxyRegion')))
+if c.get('proxyProtocol') != 'HTTP' or c.get('proxyRegion') != 'HK':
+    problems.append('C 应为 HTTP/HK，实际 %r/%r' % (c.get('proxyProtocol'), c.get('proxyRegion')))
+if b.get('proxyProtocol') != 'DIRECT' or b.get('proxyRegion') is not None:
+    problems.append('B（直连）应为 DIRECT + region=null，实际 %r/%r' % (b.get('proxyProtocol'), b.get('proxyRegion')))
+if 'proxyExit' in a:
+    problems.append('响应不应再出现旧的展示串字段 proxyExit')
+
+print('✅ 密钥明文 / 客服名称 / 代理出口（协议+地区码）均正确' if not problems else '❌ FAIL ' + '；'.join(problems))
+sys.exit(0 if not problems else 3)
+PY
+
+echo ""
+echo "═══ 4. 幂等：重复提交同一快照（含代理字段） ═══"
 SYNC2=$(req -X PUT "$BASE/api/client/accounts" \
   -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
   -d "{\"accounts\":[
-        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\"},
-        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\"},
-        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\"}
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\",\"proxyProtocol\":\"SOCKS5\",\"proxyRegion\":\"SG\"},
+        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\",\"proxyProtocol\":\"HTTP\",\"proxyRegion\":\"HK\"}
       ]}")
 check_eq "0" "$(echo "$SYNC2" | dget "d['created']")" "幂等 created"
 check_eq "0" "$(echo "$SYNC2" | dget "d['updated']")" "幂等 updated（无变化不写库）"
@@ -127,8 +163,8 @@ echo "═══ 5. 快照删除 B → 软删；再添加 → 复活（P0-C-18 AC
 SYNC3=$(req -X PUT "$BASE/api/client/accounts" \
   -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
   -d "{\"accounts\":[
-        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\"},
-        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\"}
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\",\"proxyProtocol\":\"SOCKS5\",\"proxyRegion\":\"SG\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\",\"proxyProtocol\":\"HTTP\",\"proxyRegion\":\"HK\"}
       ]}")
 check_eq "1" "$(echo "$SYNC3" | dget "d['deleted']")" "移除 B → 软删 1 条"
 check_eq "2" "$(echo "$SYNC3" | dget "d['total']")" "软删后 total=2"
@@ -137,9 +173,9 @@ check_eq "0" "$(sqlite3 "$DB" "SELECT count(*) FROM channel_accounts WHERE chann
 SYNC4=$(req -X PUT "$BASE/api/client/accounts" \
   -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
   -d "{\"accounts\":[
-        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\"},
-        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\"},
-        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\"}
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\",\"proxyProtocol\":\"SOCKS5\",\"proxyRegion\":\"SG\"},
+        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\",\"proxyProtocol\":\"HTTP\",\"proxyRegion\":\"HK\"}
       ]}")
 check_eq "1" "$(echo "$SYNC4" | dget "d['updated']")" "复活软删账号计入 updated（不重复追加）"
 check_eq "3" "$(echo "$SYNC4" | dget "d['total']")" "复活后 total=3"
@@ -184,11 +220,86 @@ check_eq "[]" "$(echo "$HB2" | dget "json.dumps(d['refreshedLeaseIds'])")" "他�
 check_eq "" "$(sqlite3 "$DB" "SELECT COALESCE(channelStatus,'') FROM port_leases WHERE id='$LEASE_A';")" "设备1 租约 channelStatus 未被篡改"
 
 echo ""
+echo "═══ 8.1 代理出口字段语义（结构化存储 / DIRECT 清空地区 / 省略不覆盖） ═══"
+acct_field() { # acct_field <channelAccountId> <字段名>；null 打印为 null
+  req "$BASE/api/supervisor/accounts" -H "Authorization: Bearer $SUP_TOKEN" | python3 -c "
+import sys, json
+items = json.load(sys.stdin)['data']['items']
+m = [i for i in items if i.get('channelAccountId') == '$1']
+v = m[0].get('$2') if m else 'MISSING'
+print('null' if v is None else v)
+"
+}
+
+# ① 协议/地区变更生效（A: SOCKS5/SG → HTTP/HK）
+req -X PUT "$BASE/api/client/accounts" \
+  -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
+  -d "{\"accounts\":[
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\",\"proxyProtocol\":\"HTTP\",\"proxyRegion\":\"HK\"},
+        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\",\"proxyProtocol\":\"HTTP\",\"proxyRegion\":\"HK\"}
+      ]}" > /dev/null
+check_eq "HTTP" "$(acct_field "$ACC_A" proxyProtocol)" "协议变更生效"
+check_eq "HK" "$(acct_field "$ACC_A" proxyRegion)" "地区码变更生效"
+
+# ② 老客户端（尚未实现代理上报）省略这两个字段 → 必须保留库中原值，不得清空
+req -X PUT "$BASE/api/client/accounts" \
+  -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
+  -d "{\"accounts\":[
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\"},
+        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\"}
+      ]}" > /dev/null
+check_eq "HTTP" "$(acct_field "$ACC_A" proxyProtocol)" "省略 proxyProtocol 时保留原值"
+check_eq "HK" "$(acct_field "$ACC_A" proxyRegion)" "省略 proxyRegion 时保留原值"
+check_eq "DIRECT" "$(acct_field "$ACC_B" proxyProtocol)" "不涉及代理的账号不受影响"
+
+# ③ 切成 DIRECT → 出口地区必须被清空（避免「DIRECT·新加坡」这类矛盾展示）
+req -X PUT "$BASE/api/client/accounts" \
+  -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
+  -d "{\"accounts\":[
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\",\"proxyProtocol\":\"HTTP\",\"proxyRegion\":\"HK\"}
+      ]}" > /dev/null
+check_eq "DIRECT" "$(acct_field "$ACC_A" proxyProtocol)" "切到本机直连"
+check_eq "null" "$(acct_field "$ACC_A" proxyRegion)" "DIRECT 时响应 region=null"
+check_eq "1" "$(sqlite3 "$DB" "SELECT count(*) FROM channel_accounts WHERE channelAccountId='$ACC_A' AND proxyRegion IS NULL;")" "DIRECT 时库中 region 已清空"
+
+echo ""
 echo "═══ 9. 入参校验与空快照 ═══"
 CODE_BAD=$(req -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/client/accounts" \
   -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
   -d "{\"accounts\":[{\"channelAccountId\":\"$ACC_A\",\"channel\":\"WECHAT\",\"accountName\":\"非法渠道\"}]}")
 check_eq "400" "$CODE_BAD" "非法渠道 → 400"
+
+CODE_PROTO=$(req -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/client/accounts" \
+  -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
+  -d "{\"accounts\":[{\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"非法协议\",\"proxyProtocol\":\"SHADOWSOCKS\"}]}")
+check_eq "400" "$CODE_PROTO" "非法代理协议 → 400"
+
+CODE_REGION=$(req -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/client/accounts" \
+  -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
+  -d "{\"accounts\":[{\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"小写地区码\",\"proxyProtocol\":\"SOCKS5\",\"proxyRegion\":\"sg\"}]}")
+check_eq "400" "$CODE_REGION" "地区码必须为 ISO alpha-2 大写 → 400"
+
+CODE_DIRECT_REGION=$(req -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/client/accounts" \
+  -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
+  -d "{\"accounts\":[{\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"直连带地区\",\"proxyProtocol\":\"DIRECT\",\"proxyRegion\":\"SG\"}]}")
+check_eq "400" "$CODE_DIRECT_REGION" "DIRECT 携带 proxyRegion → 400"
+
+# 出口地探测失败（P0-C-18 AC12）：只给协议不给地区码，必须照常接受
+SYNC_PROTO_ONLY=$(req -X PUT "$BASE/api/client/accounts" \
+  -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
+  -d "{\"accounts\":[
+        {\"channelAccountId\":\"$ACC_A\",\"channel\":\"TELEGRAM\",\"accountName\":\"东南亚主号\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_B\",\"channel\":\"WHATSAPP\",\"accountName\":\"中东客服A\",\"proxyProtocol\":\"DIRECT\"},
+        {\"channelAccountId\":\"$ACC_C\",\"channel\":\"TELEGRAM\",\"accountName\":\"越南备号\",\"proxyProtocol\":\"SOCKS5\"}
+      ]}")
+check_eq "1" "$(echo "$SYNC_PROTO_ONLY" | dget "d['updated']")" "只上报协议（出口地未知）照常接受"
+check_eq "SOCKS5" "$(acct_field "$ACC_C" proxyProtocol)" "协议已写入"
+check_eq "null" "$(acct_field "$ACC_C" proxyRegion)" "出口地未知时 region=null"
+
 SYNC5=$(req -X PUT "$BASE/api/client/accounts" \
   -H "Authorization: Bearer $ACCESS1" -H "X-Device-Fingerprint: $FP1" -H 'Content-Type: application/json' \
   -d '{"accounts":[]}')

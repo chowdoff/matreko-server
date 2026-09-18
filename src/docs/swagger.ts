@@ -467,6 +467,19 @@ const options: swaggerJsdoc.Options = {
                     maxLength: 64,
                     description: '客服自定义别名（P0-C-18「账号名称」）',
                   },
+                  proxyProtocol: {
+                    type: 'string',
+                    enum: ['SOCKS5', 'HTTP', 'HTTPS', 'DIRECT'],
+                    description:
+                      '代理协议；DIRECT = 本机直连。省略 = 不上报，服务端保留原值（兼容老客户端）',
+                  },
+                  proxyRegion: {
+                    type: 'string',
+                    pattern: '^[A-Z]{2}(-[A-Z0-9]{1,4})?$',
+                    description:
+                      '代理出口地区码（ISO 3166-1 alpha-2 大写，如 SG / HK）。' +
+                      '省略表示出口地未知（P0-C-18 AC12：探测不到也照常保存）；DIRECT 时禁止携带',
+                  },
                 },
               },
             },
@@ -490,14 +503,20 @@ const options: swaggerJsdoc.Options = {
             portsHeld: { type: 'integer', description: '占用端口数（0 或 1）' },
             leaseId: { type: 'string', nullable: true, description: '当前 HELD 租约；未启动为 null' },
             keyId: { type: 'string' },
-            keyNickname: { type: 'string' },
+            keyNickname: { type: 'string', description: '客服名称（= 密钥昵称）' },
+            licenseCode: {
+              type: 'string',
+              nullable: true,
+              example: 'MTRK-3F7Q-9WZP-K2LM-8XVT',
+              description: '密钥明文（AES-256-GCM 解密后返回；解密失败为 null）',
+            },
             clientId: { type: 'string' },
             createdAt: { type: 'string', format: 'date-time', description: '账号添加时刻' },
             acquiredAt: {
               type: 'string',
               format: 'date-time',
               nullable: true,
-              description: '当前租约占用时刻；未启动为 null',
+              description: '本次启动时刻（当前租约占用时刻）；未启动为 null',
             },
             lastSeenAt: {
               type: 'string',
@@ -506,7 +525,20 @@ const options: swaggerJsdoc.Options = {
               description: '最后一次心跳时刻；未启动为 null',
             },
             releasedAt: { type: 'string', format: 'date-time', nullable: true },
-            proxyExit: { type: 'string' },
+            proxyProtocol: {
+              type: 'string',
+              enum: ['SOCKS5', 'HTTP', 'HTTPS', 'DIRECT'],
+              nullable: true,
+              description: '代理协议；null = 客户端尚未上报',
+            },
+            proxyRegion: {
+              type: 'string',
+              nullable: true,
+              example: 'SG',
+              description:
+                '代理出口地区码（ISO 3166-1 alpha-2）；DIRECT 或未知为 null。' +
+                '展示串（如「SOCKS5·新加坡」）由前端拼，服务端不存展示串',
+            },
             timezone: { type: 'string', example: 'Asia/Shanghai' },
           },
         },

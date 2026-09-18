@@ -257,12 +257,14 @@ channel_accounts (WHERE teamId = ? AND deletedAt IS NULL)
         "leaseId": "cmt6vstlm0001uoi07ldnjb7y",
         "keyId": "cmt2q1yq50003uo84g5hq1h69",
         "keyNickname": "海外一部密钥",
+        "licenseCode": "MTRK-3F7Q-9WZP-K2LM-8XVT",
         "clientId": "cli_3I_aMP-Ir6uxYLX9SivRWg",
         "createdAt": "2026-09-17T02:10:00.000Z",
         "acquiredAt": "2026-09-17T03:00:00.000Z",
         "lastSeenAt": "2026-09-17T03:05:00.000Z",
         "releasedAt": null,
-        "proxyExit": "",
+        "proxyProtocol": "SOCKS5",
+        "proxyRegion": "SG",
         "timezone": "Asia/Shanghai"
       }
     ],
@@ -284,7 +286,10 @@ channel_accounts (WHERE teamId = ? AND deletedAt IS NULL)
 | 字段 | 来源 | 变更 |
 |---|---|---|
 | `accountName` | `channel_accounts.accountName` | 🆕 真实别名（替代原先从 key 拼出的 `accountId`） |
-| `createdAt` | `channel_accounts.createdAt` | 🆕 账号**添加**时刻（对应前端"添加时间"列） |
+| `licenseCode` | `license_keys.code` 解密 | 🆕 2026-09-18：密钥明文（AES-256-GCM），主管端「所属密钥/客服」单元格上行 |
+| `keyNickname` | `license_keys.nickname` | 「所属密钥/客服」单元格下行（客服名称） |
+| `proxyProtocol` / `proxyRegion` | `channel_accounts` | 🆕 2026-09-18：代理出口**结构化两字段**（详见 §6），替代已删除的展示串字段 `proxyExit` |
+| `createdAt` | `channel_accounts.createdAt` | 🆕 账号**添加**时刻（客户端自检用；主管端列已改为「本次启动时间」= `acquiredAt`） |
 | `acquiredAt` / `lastSeenAt` / `releasedAt` | 当前 / 最近一次租约 | ⚠️ 未启动时为 `null`（原先恒有值） |
 | `status` | 派生 | ⚠️ 枚举变更，见 §4.1 |
 | `online` | `status === 'ONLINE'` | 🆕 补齐（前端原本就在用） |
@@ -467,3 +472,54 @@ onlineWindowMs: toInt(process.env.ONLINE_WINDOW, 5 * 60 * 1000, 'ONLINE_WINDOW')
 4. **`channelAccountKey` 双轨期** —— 老客户端仍传裸 id 时，`acquire` 无法判定渠道 → 不自动补登（仍可由对账补齐）；回填脚本对这类记录跳过并打印清单。
 5. **本地库已清空（2026-09-17）** —— 业务数据全抹除、仅保留 PLATFORM 管理员（`scripts/wipe-data.ts`，已补 `ChannelAccount` / `KeyDailyUsage` 两张表）；备份留在 `prisma/dev.db.bak-20260917-181004`。**抹除后用户后台无可用账号**：SUPERVISOR 账号随团队一并删除，且登录要求角色严格匹配 → 需先以平台管理员登录、创建团队拿到主管初始密码，才能再进用户后台。
 
+
+---
+
+## 10. 2026-09-18 修订：账号列表列序定稿 + 代理出口存储方案
+
+### 10.1 列名与列序（用户定稿）
+
+| 序 | 列名 | 响应字段 | 备注 |
+|---|---|---|---|
+| 1 | 账号名称 | `accountName` | tooltip 附 `channelAccountKey` + `clientId`（原「设备」列并入） |
+| 2 | 渠道 | `channel` | Telegram / WhatsApp |
+| 3 | 状态 | `status` | 未启动 / 等待扫码 / 在线 / 离线（仍占端口） |
+| 4 | 占用端口数 | `portsHeld` | 0 或 1 |
+| 5 | 所属密钥/客服 | `licenseCode` + `keyNickname` | **两行**：上密钥明文、下客服名称 |
+| 6 | 代理出口 | `proxyProtocol` + `proxyRegion` | 前端拼 `SOCKS5·新加坡` / `直连` |
+| 7 | 本次启动时间 | `acquiredAt` | 未启动显示「未启动」 |
+
+被移除的列：「设备」（并入账号名称 tooltip，避免多设备同名账号无法区分的问题反而消失）、
+「添加时间」（`createdAt` 仍在响应里，供客户端自检）、「最后活跃」（`lastSeenAt` 同理保留返回）。
+
+### 10.2 代理出口：为什么不存展示串
+
+用户问「直接存完整字符串，还是存两个字段拼接」——**采用两个字段**：
+
+- 库里存 `proxyProtocol`（枚举 SOCKS5 / HTTP / HTTPS / DIRECT）+ `proxyRegion`（ISO 3166-1 alpha-2 大写码，如 `SG`）；
+- 展示串 `协议·地区` 由前端拼（`matreko-user-web/src/utils/proxy.ts`），后端**不返回展示串**。
+
+理由：① 展示格式/语言会变，存串等于把 UI 决策写进库，改版要数据迁移；② 主管端将来要"只看走香港出口的账号"或按协议统计，两字段可直接 `where`/`groupBy`，存串只能 `LIKE`；③ 客户端上报可强校验（协议走枚举、地区码走正则），避免 `socks5·新加坡` / `新加坡 socks5` 这类脏数据入库；④ 中文名属展示层，存码才能多语言；⑤ 存储成本几乎相同。
+
+映射关系：`DIRECT` → 展示「直连」；`proxyProtocol` 有值但 `proxyRegion` 为 null（AC12 探测失败）→ 只显示协议；两个都 null（老客户端未上报）→ 显示「未上报」。
+
+### 10.3 连带清理：`PortLease.proxyExit` 死字段
+
+`PortLease.proxyExit`（注释写着"如 SOCKS5·新加坡，仅展示用途"）**全仓没有任何写入点**，前端也从未渲染 → 一直返回空串。本次一并删除，代理出口统一由登记表承载；端口占用页改为按 `(clientId, channelAccountId)` 回表取 `proxyProtocol` / `proxyRegion`。
+
+> 这与前两轮修掉的 `channelStatus` 无写入点、`ONLINE_WINDOW` 硬编码属同一类问题：**设计与实现脱节留下的字段/常量**。凡"文档里有、链路里没有"的字段，宁可删掉也别留着当第二种口径。
+
+### 10.4 校验规则（`PUT /api/client/accounts`）
+
+| 情况 | 行为 |
+|---|---|
+| `proxyProtocol` / `proxyRegion` 均省略 | 合法：**保留库中原值**（兼容尚未实现代理上报的客户端） |
+| 只给协议、不给地区码 | 合法：出口地未知（P0-C-18 AC12），`proxyRegion` 落库为 null |
+| `DIRECT` + `proxyRegion` | **400**（直连没有出口地，避免「DIRECT·新加坡」自相矛盾） |
+| 协议不在枚举内（如 `SHADOWSOCKS`） | 400 |
+| 地区码非 `^[A-Z]{2}(-[A-Z0-9]{1,4})?$`（如小写 `sg`） | 400 |
+| 改成 `DIRECT` | 自动清空 `proxyRegion`（响应与库中同时为 null） |
+
+### 10.5 回归覆盖
+
+`scripts/verify-channel-accounts.sh` 扩到 **11 段 61 条断言**：新增 3.1（密钥明文/客服名称/代理出口字段）、8.1（变更生效 / 省略不覆盖 / DIRECT 清空地区）、9 段补 4 类校验；前端在隔离库 + 无头 Chrome 实渲染核对列序与两行单元格（截图 `im-accounts-new.png`）。

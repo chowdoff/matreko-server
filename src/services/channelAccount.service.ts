@@ -1,8 +1,10 @@
 import { prisma } from '@/lib/prisma';
 import { env } from '@/config/env';
+import { tryDecryptLicenseCode } from '@/lib/crypto';
 import { normalizeChannelAccountId, buildChannelAccountKey } from '@/lib/channelAccountKey';
 import type { ChannelValue } from '@/lib/channelAccountKey';
-import type { SyncChannelAccountItem } from '@/schemas/channelAccount.schema';
+import type { SyncChannelAccountItem, ProxyProtocolValue } from '@/schemas/channelAccount.schema';
+export type { ProxyProtocolValue };
 
 /** 时区标注（PRD §2.6） */
 const TIMEZONE = 'Asia/Shanghai';
@@ -25,8 +27,10 @@ interface AccountRow {
   channelAccountId: string;
   channel: ChannelValue;
   accountName: string;
+  proxyProtocol: string | null;
+  proxyRegion: string | null;
   createdAt: Date;
-  licenseKey: { id: string; nickname: string };
+  licenseKey: { id: string; nickname: string; code: string | null };
 }
 
 interface LeaseRow {
@@ -39,8 +43,9 @@ interface LeaseRow {
   acquiredAt: Date;
   lastSeenAt: Date;
   releasedAt: Date | null;
-  proxyExit: string | null;
 }
+
+/** 代理协议（与 Prisma `ProxyProtocol` 枚举一致的字符串形态） */
 
 export interface ChannelAccountItem {
   channelAccountId: string;
@@ -54,13 +59,21 @@ export interface ChannelAccountItem {
   portsHeld: number;
   leaseId: string | null;
   keyId: string;
+  /** 客服名称（= LicenseKey.nickname，主管端「所属密钥/客服」的第二行） */
   keyNickname: string;
+  /** 密钥明文（AES-256-GCM 解密）；解密失败或无密钥时为 null */
+  licenseCode: string | null;
+  /** 代理协议；null = 客户端暂未上报 */
+  proxyProtocol: ProxyProtocolValue | null;
+  /** 代理出口地区码（ISO 3166-1 alpha-2，如 SG）；DIRECT/未知为 null。展示串由前端拼 */
+  proxyRegion: string | null;
   clientId: string;
+  /** 账号添加时刻（与是否启动无关） */
   createdAt: string;
+  /** 本次启动时刻（当前 HELD 租约的 acquiredAt）；未启动为 null */
   acquiredAt: string | null;
   lastSeenAt: string | null;
   releasedAt: string | null;
-  proxyExit: string;
   timezone: string;
 }
 
@@ -106,6 +119,7 @@ function assembleItems(
     const lease = heldMap.get(leaseIndexKey(a.clientId, a.channelAccountId));
     const status = deriveStatus(lease, nowMs);
     const isHeld = status !== 'NOT_STARTED';
+    const proxyProtocol = (a.proxyProtocol as ProxyProtocolValue | null) ?? null;
 
     return {
       channelAccountId: a.channelAccountId,
@@ -120,12 +134,18 @@ function assembleItems(
       leaseId: lease?.id ?? null,
       keyId: a.keyId,
       keyNickname: a.licenseKey.nickname,
+      // 密钥明文仅主管端可见（与 KeyManagement 页同源：AES-256-GCM 解密后返回）
+      licenseCode: a.licenseKey.code
+        ? tryDecryptLicenseCode(a.licenseKey.code, env.licenseCodeEncKey)
+        : null,
+      proxyProtocol,
+      // DIRECT（直连）在语义上没有出口地，避免出现「DIRECT·新加坡」这类矛盾展示
+      proxyRegion: proxyProtocol === 'DIRECT' ? null : a.proxyRegion,
       clientId: a.clientId,
       createdAt: a.createdAt.toISOString(),
       acquiredAt: lease?.acquiredAt.toISOString() ?? null,
       lastSeenAt: lease?.lastSeenAt.toISOString() ?? null,
       releasedAt: lease?.releasedAt?.toISOString() ?? null,
-      proxyExit: lease?.proxyExit ?? '',
       timezone: TIMEZONE,
     };
   });
@@ -166,6 +186,13 @@ export class ChannelAccountService {
     const existing = await prisma.channelAccount.findMany({ where: { clientId } });
     const existingById = new Map(existing.map((e) => [e.channelAccountId, e]));
 
+    // 快照里的代理出口：`channelAccountId → { proxyProtocol, proxyRegion }`
+    // (未上报 = 保持库中原值不动，避免老客户端把已有信息覆盖成 null)
+    const proxyOf = (item: SyncChannelAccountItem) => ({
+      proxyProtocol: item.proxyProtocol ?? null,
+      proxyRegion: item.proxyProtocol === 'DIRECT' ? null : (item.proxyRegion ?? null),
+    });
+
     const now = new Date();
     const result = { created: 0, updated: 0, deleted: 0 };
 
@@ -173,6 +200,7 @@ export class ChannelAccountService {
       async (tx) => {
       for (const item of snapshot.values()) {
         const prev = existingById.get(item.channelAccountId);
+        const proxy = proxyOf(item);
 
         if (!prev) {
           await tx.channelAccount.create({
@@ -183,6 +211,7 @@ export class ChannelAccountService {
               channelAccountId: item.channelAccountId,
               channel: item.channel,
               accountName: item.accountName,
+              ...proxy,
             },
           });
           result.created += 1;
@@ -196,7 +225,9 @@ export class ChannelAccountService {
           prev.channel !== item.channel ||
           prev.accountName !== item.accountName ||
           prev.teamId !== teamId ||
-          prev.keyId !== keyId;
+          prev.keyId !== keyId ||
+          (item.proxyProtocol !== undefined &&
+            (prev.proxyProtocol !== proxy.proxyProtocol || prev.proxyRegion !== proxy.proxyRegion));
 
         if (changed) {
           await tx.channelAccount.update({
@@ -206,6 +237,8 @@ export class ChannelAccountService {
               accountName: item.accountName,
               teamId,
               keyId,
+              // 未上报代理时保留原值（老客户端不带这两个字段）
+              ...(item.proxyProtocol !== undefined ? proxy : {}),
               deletedAt: null,
             },
           });
@@ -252,7 +285,8 @@ export class ChannelAccountService {
         deletedAt: null,
         ...(filter?.clientId ? { clientId: filter.clientId } : {}),
       },
-      include: { licenseKey: { select: { id: true, nickname: true } } },
+      // licenseKey 一并取 code（密文）：主管端「所属密钥/客服」需要密钥明文
+      include: { licenseKey: { select: { id: true, nickname: true, code: true } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
 

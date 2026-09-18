@@ -441,6 +441,7 @@ M0 工程基础
 - **开发内容**：本团队所有密钥下已添加的渠道账号及渠道、状态、所属密钥；空态展示。
 - **验收要点**：AC1、AC6 空态不报错。
 - **数据来源（2026-09-17 增补）**：`GET /api/supervisor/accounts` → `channel_accounts` 登记表（主）+ 当前 HELD 租约（运行态）。前端须按四项字段对齐（否则状态列恒显示「离线」、添加时间列对未启动账号为空）：状态列改用 `row.status` 四态渲染（含「未启动」）；「添加时间」改取 `row.createdAt`（`acquiredAt` 对未启动账号为 `null`）；统计卡改用 `summary.offline` / `summary.notStarted`。
+- **列名列序定稿（2026-09-18）**：账号名称 → 渠道 → 状态 → 占用端口数 → 所属密钥/客服 → 代理出口 → 本次启动时间。「所属密钥/客服」为两行单元格（上密钥明文 `licenseCode`、下客服名称 `keyNickname`）；「代理出口」由前端拼 `协议·地区`（`proxyProtocol` + `proxyRegion`，见 `channel-account-design.md` §10）。
 
 #### T6-05 端口用量页（含手动释放）
 

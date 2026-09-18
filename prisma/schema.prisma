@@ -45,6 +45,18 @@ enum Channel {
   WHATSAPP
 }
 
+/**
+ * 代理协议（P0-C-18 AC1：客户端支持 SOCKS5 / HTTP(S)）
+ * - DIRECT = 未配置代理（本机直连），此时出口地无意义
+ * 说明：SQLite 下 Prisma 枚举只落 TEXT，新增协议值只需改这里 + 重新 db push。
+ */
+enum ProxyProtocol {
+  SOCKS5
+  HTTP
+  HTTPS
+  DIRECT
+}
+
 enum TranslationEngine {
   GOOGLE
   DEEPL
@@ -183,8 +195,6 @@ model PortLease {
   acquiredAt        DateTime    @default(now())
   lastSeenAt        DateTime    @default(now())
   releasedAt        DateTime?
-  /// 代理出口展示信息（如 'SOCKS5·新加坡'），仅展示用途
-  proxyExit         String?
   /// IM 渠道账号业务状态：ONLINE / WAITING_QR / OFFLINE，仅展示用途（由客户端心跳上报）
   channelStatus     String?
 
@@ -194,9 +204,15 @@ model PortLease {
 
 /// 渠道账号登记（P0-C-03 AC1 / P0-B-10 AC1）
 ///
-/// 服务端**仅登记存在性元数据**（渠道 / 别名 / 归属）；代理、指纹、数据目录等配置内容
-/// 仍只存客户端本地，不违反 P0-C-18 AC18「各设备账号配置互相独立、不做同步」。
+/// 服务端**仅登记存在性元数据**（渠道 / 别名 / 归属 / 代理出口摘要）；代理凭据、指纹、
+/// 数据目录等配置内容仍只存客户端本地，不违反 P0-C-18 AC18「各设备账号配置互相独立、不做同步」。
 /// 与 backend.md §3.3 B 的「本地账号配置库」契约是两张不同的表，勿混淆（见 channel-account-design.md §2.3）。
+///
+/// 代理出口**拆两个机器可读字段**而非存展示串「SOCKS5·新加坡」：
+/// - `proxyProtocol` 协议（闭集，枚举）；`proxyRegion` 出口地区码（ISO 3166-1 alpha-2，如 SG/HK）。
+/// - 理由：展示格式/语言可变（存串=把 UI 决策写进库，改版要数据迁移）；需要按地区或协议
+///   筛选统计（两字段可 where/groupBy，存串只能 LIKE）；可强校验避免「socks5·新加坡 /
+///   新加坡 socks5」这类脏数据。展示串由前端拼（user-web `utils/proxy.ts`）。
 model ChannelAccount {
   id               String     @id @default(cuid())
   teamId           String
@@ -210,6 +226,10 @@ model ChannelAccount {
   channel          Channel
   /// 客服自定义别名（P0-C-18「账号名称」，≤64 字符）
   accountName      String
+  /// 代理协议；null = 客户端尚未上报（未知），DIRECT = 显式本机直连
+  proxyProtocol    ProxyProtocol?
+  /// 代理出口地区码：ISO 3166-1 alpha-2 大写（如 SG / HK）；DIRECT 或未知时为 null
+  proxyRegion      String?
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
   /// 软删除（P0-C-18 AC15 删除账号配置）；主管端默认不展示
@@ -218,6 +238,7 @@ model ChannelAccount {
   @@unique([clientId, channelAccountId])
   @@index([teamId, deletedAt])
   @@index([keyId])
+  @@index([teamId, proxyRegion])
   @@map("channel_accounts")
 }
 

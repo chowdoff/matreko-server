@@ -36,7 +36,13 @@ X-Device-Fingerprint: <与激活时一致的设备指纹>
 ```json
 {
   "accounts": [
-    { "channelAccountId": "<本地 port.id>", "channel": "TELEGRAM", "accountName": "<本地 port.name>" }
+    {
+      "channelAccountId": "<本地 port.id>",
+      "channel": "TELEGRAM",
+      "accountName": "<本地 port.name>",
+      "proxyProtocol": "SOCKS5",
+      "proxyRegion": "SG"
+    }
   ]
 }
 ```
@@ -48,7 +54,9 @@ X-Device-Fingerprint: <与激活时一致的设备指纹>
 - **删除账号 = 从快照里移除**即可（服务端软删，不物理删除；重新添加同 id 会自动复位）。
 - **空数组合法**：表示本机已无账号（全部软删）。**不要在失败时发送空数组兜底**。
 - **天然幂等**：同一快照重复提交 → `created=0, updated=0, deleted=0`。
-- 只上报存在性元数据：**不要**上报 proxy、浏览器指纹、数据目录（P0-C-18 AC18）。
+- 只上报存在性元数据：**不要**上报代理 host/port/账号密码、浏览器指纹、数据目录（P0-C-18 AC18）。
+  仅 `proxyProtocol` + `proxyRegion` 这对**出口摘要**要上报 —— 主管端「代理出口」列要用，
+  且 P0-C-18 AC4/AC11 的地区一致性校验靠它；它不含任何可复用的凭据。
 
 ### 字段约束
 
@@ -57,6 +65,15 @@ X-Device-Fingerprint: <与激活时一致的设备指纹>
 | `channelAccountId` | 1~128 字符，必填，本机内唯一 | 本地 `port.id` |
 | `channel` | 枚举 `TELEGRAM` / `WHATSAPP`，必填 | 本地 `port.platform` 大写映射（当前只有 `telegram`） |
 | `accountName` | 1~64 字符，必填 | 本地 `port.name` |
+| `proxyProtocol` | 可选，枚举 `SOCKS5` / `HTTP` / `HTTPS` / `DIRECT` | 本地代理配置的 type；未配代理填 `DIRECT` |
+| `proxyRegion` | 可选，`^[A-Z]{2}(-[A-Z0-9]{1,4})?$`（ISO 3166-1 alpha-2 大写，如 `SG` / `HK`） | 代理「测试出口 IP」得到的地理位置；探测不到就不传（AC12） |
+
+**代理字段的三条规则（务必照做）**：
+
+1. **未实现代理上报的版本 → 直接省略这两个字段**，服务端会保留库中原值，不会清空；
+2. **配了代理但出口地探测失败 → 只传 `proxyProtocol`**，`proxyRegion` 不传（合法，显示时只有协议）；
+3. **`proxyProtocol: "DIRECT"` 时禁止传 `proxyRegion`**（400）——直连的出口地就是本机，传地区会自相矛盾。
+   客服后来改回直连时，传 `DIRECT` 即可让服务端自动清空原有地区。
 
 单次最多 500 条（超出请分批，但注意分批会互相软删，**不要分批**——500 是防御性上限，正常远低于此）。
 
@@ -74,7 +91,11 @@ X-Device-Fingerprint: <与激活时一致的设备指纹>
 }
 ```
 
-`accounts[]` 每项含 `channelAccountId / accountName / channel / status / online / isHeld / portsHeld / leaseId / keyId / keyNickname / clientId / createdAt / acquiredAt / lastSeenAt / proxyExit`，客户端可用于本地自检（例如发现服务端 `leaseId` 与自己记录不一致时对齐）。
+`accounts[]` 每项含 `channelAccountId / accountName / channel / status / online / isHeld / portsHeld / leaseId / keyId / keyNickname / licenseCode / proxyProtocol / proxyRegion / clientId / createdAt / acquiredAt / lastSeenAt`，客户端可用于本地自检（例如发现服务端 `leaseId` 与自己记录不一致时对齐）。
+
+> **契约变更（2026-09-18）**：`proxyExit`（展示串，如 `SOCKS5·新加坡`）已从响应中**移除**，
+> 换成结构化的 `proxyProtocol` + `proxyRegion`；展示串由用户后台前端拼。
+> 新增 `licenseCode`（密钥明文，主管端展示用）。客户端若已在用 `proxyExit`，改读这两个字段。
 
 ### 调用时机
 
