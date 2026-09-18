@@ -442,6 +442,122 @@ const options: swaggerJsdoc.Options = {
           },
         },
 
+        // ── 渠道账号（P0-C-03 AC1 / P0-B-10 AC1） ──
+        SyncChannelAccountsRequest: {
+          type: 'object',
+          required: ['accounts'],
+          properties: {
+            accounts: {
+              type: 'array',
+              maxItems: 500,
+              description:
+                '本机全部**未删除**账号构成的完整快照；空数组表示本机已无账号（全部软删）',
+              items: {
+                type: 'object',
+                required: ['channelAccountId', 'channel', 'accountName'],
+                properties: {
+                  channelAccountId: {
+                    type: 'string',
+                    maxLength: 128,
+                    description: '客户端侧稳定标识（本地 port.id，单机内唯一）',
+                  },
+                  channel: { type: 'string', enum: ['TELEGRAM', 'WHATSAPP'] },
+                  accountName: {
+                    type: 'string',
+                    maxLength: 64,
+                    description: '客服自定义别名（P0-C-18「账号名称」）',
+                  },
+                },
+              },
+            },
+          },
+        },
+        ChannelAccountItem: {
+          type: 'object',
+          properties: {
+            channelAccountId: { type: 'string' },
+            accountId: { type: 'string', description: '同 channelAccountId（兼容旧前端字段名）' },
+            channelAccountKey: { type: 'string', example: 'TELEGRAM:k9x2m' },
+            channel: { type: 'string', enum: ['TELEGRAM', 'WHATSAPP'] },
+            accountName: { type: 'string' },
+            status: {
+              type: 'string',
+              enum: ['NOT_STARTED', 'WAITING_QR', 'ONLINE', 'OFFLINE'],
+              description: '账号状态（不含 RELEASED——那是端口租约语义）',
+            },
+            online: { type: 'boolean', description: 'status === ONLINE' },
+            isHeld: { type: 'boolean', description: '是否占用端口' },
+            portsHeld: { type: 'integer', description: '占用端口数（0 或 1）' },
+            leaseId: { type: 'string', nullable: true, description: '当前 HELD 租约；未启动为 null' },
+            keyId: { type: 'string' },
+            keyNickname: { type: 'string' },
+            clientId: { type: 'string' },
+            createdAt: { type: 'string', format: 'date-time', description: '账号添加时刻' },
+            acquiredAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description: '当前租约占用时刻；未启动为 null',
+            },
+            lastSeenAt: {
+              type: 'string',
+              format: 'date-time',
+              nullable: true,
+              description: '最后一次心跳时刻；未启动为 null',
+            },
+            releasedAt: { type: 'string', format: 'date-time', nullable: true },
+            proxyExit: { type: 'string' },
+            timezone: { type: 'string', example: 'Asia/Shanghai' },
+          },
+        },
+        ImAccountsResponse: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean', example: true },
+            data: {
+              type: 'object',
+              properties: {
+                items: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/ChannelAccountItem' },
+                },
+                summary: {
+                  type: 'object',
+                  properties: {
+                    total: { type: 'integer' },
+                    online: { type: 'integer' },
+                    offline: { type: 'integer', description: '离线但仍占端口' },
+                    waitingQr: { type: 'integer' },
+                    notStarted: { type: 'integer', description: '已添加但未启动（不占端口）' },
+                    portsHeld: { type: 'integer' },
+                  },
+                },
+                timezone: { type: 'string', example: 'Asia/Shanghai' },
+              },
+            },
+          },
+        },
+        SyncChannelAccountsResponse: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean', example: true },
+            data: {
+              type: 'object',
+              properties: {
+                created: { type: 'integer' },
+                updated: { type: 'integer' },
+                deleted: { type: 'integer', description: '本次软删数量' },
+                total: { type: 'integer', description: '对账后本机账号总数' },
+                accounts: {
+                  type: 'array',
+                  items: { $ref: '#/components/schemas/ChannelAccountItem' },
+                },
+                timezone: { type: 'string', example: 'Asia/Shanghai' },
+              },
+            },
+          },
+        },
+
         // ── 端口租约（P0-C-20） ──
         AcquirePortRequest: {
           type: 'object',
@@ -449,8 +565,18 @@ const options: swaggerJsdoc.Options = {
           properties: {
             channelAccountKey: {
               type: 'string',
-              description: 'channel:accountId 稳定标识（客户端生成）',
+              description: '客户端原始上报值（历史字段）：可传 `channel:id` 或裸 id',
               example: 'telegram:123456789',
+            },
+            channelAccountId: {
+              type: 'string',
+              description:
+                '规范化账号标识（客户端本地 port.id）；不传则从 channelAccountKey 解析。建议升级后的客户端传全',
+            },
+            channel: {
+              type: 'string',
+              enum: ['TELEGRAM', 'WHATSAPP'],
+              description: '渠道；不传则按 channelAccountKey 冒号前缀识别（识别不出则不落渠道）',
             },
           },
         },
@@ -466,10 +592,11 @@ const options: swaggerJsdoc.Options = {
                 keyId: { type: 'string' },
                 clientId: { type: 'string' },
                 channelAccountKey: { type: 'string' },
+                channelAccountId: { type: 'string', description: '规范化后的账号标识' },
                 status: { type: 'string', enum: ['HELD'] },
                 acquiredAt: { type: 'string', format: 'date-time' },
                 lastSeenAt: { type: 'string', format: 'date-time' },
-                alreadyHeld: { type: 'boolean', description: 'true = 同 (clientId, channelAccountKey) 已有 HELD（幂等）' },
+                alreadyHeld: { type: 'boolean', description: 'true = 同 (clientId, 账号标识) 已有 HELD（幂等）' },
                 timezone: { type: 'string', example: 'Asia/Shanghai' },
               },
             },
@@ -483,6 +610,19 @@ const options: swaggerJsdoc.Options = {
               type: 'array',
               items: { type: 'string' },
               description: '本机持有的全部 leaseId',
+            },
+            channelStatuses: {
+              type: 'array',
+              description:
+                '可选：各租约的渠道业务状态（P0-C-03 AC4/AC8/AC9/AC10）。仅本人名下且仍 HELD 的租约会被写入；老客户端不传则行为不变',
+              items: {
+                type: 'object',
+                required: ['leaseId', 'status'],
+                properties: {
+                  leaseId: { type: 'string' },
+                  status: { type: 'string', enum: ['ONLINE', 'WAITING_QR', 'OFFLINE'] },
+                },
+              },
             },
           },
         },
@@ -502,6 +642,10 @@ const options: swaggerJsdoc.Options = {
                   type: 'array',
                   items: { type: 'string' },
                   description: '已回收/已撤销的 leaseId，客户端须关闭对应浏览器实例并置账号「未启动」',
+                },
+                channelStatusUpdated: {
+                  type: 'integer',
+                  description: '本次写入 channelStatus 的租约数（未上报 channelStatuses 时恒为 0）',
                 },
                 overQuota: { type: 'boolean', description: '配额下调导致 held > quota' },
                 heldCount: { type: 'integer', description: '团队当前 HELD 数' },

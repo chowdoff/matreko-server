@@ -10,6 +10,7 @@ import { supervisorAuthRouter, platformAuthRouter } from '@/routes/auth.routes';
 import { teamRouter } from '@/routes/team.routes';
 import { licenseRouter } from '@/routes/license.routes';
 import { clientRouter } from '@/routes/client.routes';
+import { clientAccountRouter } from '@/routes/clientAccount.routes';
 import { clientPortRouter, supervisorPortRouter, platformPortRouter } from '@/routes/port.routes';
 import { clientTranslateRouter, translationKeyRouter } from '@/routes/translation.routes';
 import { supervisorUsageRouter } from '@/routes/usage.routes';
@@ -77,6 +78,7 @@ export function createApp(): Express {
 
   // 客户端接口（P0-A-01 / P0-A-02 / P0-C-20 / 翻译代理）
   app.use('/api/client', clientRouter);
+  app.use('/api/client', clientAccountRouter);
   app.use('/api/client', clientPortRouter);
   app.use('/api/client', clientTranslateRouter);
 

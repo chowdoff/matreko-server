@@ -195,6 +195,9 @@ export class ActivateService {
         clientId,
         refreshTokenHash,
         expiresAt,
+        // 激活即视为一次设备活跃：主管端「设备管理」页立刻显示在线，
+        // 之后由 POST /api/client/ports/heartbeat 持续保活刷新（见 port.service.heartbeat）
+        lastActiveAt: new Date(),
       },
     });
 

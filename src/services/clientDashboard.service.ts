@@ -1,10 +1,8 @@
 import { prisma } from '@/lib/prisma';
+import { env } from '@/config/env';
 import { getKeyStatusWithCache } from '@/services/token.service';
 
 const TIMEZONE = 'Asia/Shanghai';
-
-/** 在线判定窗口（与 P0-C-20 AC2 / supervisor 端口看板一致） */
-const ONLINE_THRESHOLD_MS = 5 * 60 * 1000;
 
 /** 客户端 Home 页所需的一次性聚合数据（P0-C-20 / P0-B-10 AC19 / T1-06 增强） */
 export interface ClientDashboardData {
@@ -173,7 +171,7 @@ export async function getClientDashboard(
       heldInChannel
         .filter(
           (l) =>
-            l.channelStatus === 'ONLINE' && now - l.lastSeenAt.getTime() <= ONLINE_THRESHOLD_MS,
+            l.channelStatus === 'ONLINE' && now - l.lastSeenAt.getTime() <= env.onlineWindowMs,
         )
         .map((l) => l.channelAccountKey),
     ).size;
@@ -188,7 +186,7 @@ export async function getClientDashboard(
           (l) =>
             l.channelStatus === 'OFFLINE' ||
             (l.channelStatus !== 'WAITING_QR' &&
-              now - l.lastSeenAt.getTime() > ONLINE_THRESHOLD_MS),
+              now - l.lastSeenAt.getTime() > env.onlineWindowMs),
         )
         .map((l) => l.channelAccountKey),
     ).size;

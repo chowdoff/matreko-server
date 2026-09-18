@@ -14,6 +14,7 @@ dist/
 # Database
 *.db
 *.db-journal
+*.db.bak*
 prisma/migrations/dev.db*
 
 # IDE

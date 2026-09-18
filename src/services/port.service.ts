@@ -3,6 +3,7 @@ import { AppError } from '@/utils/AppError';
 import { ErrorCode } from '@/constants/errorCodes';
 import { writeAuditLog, AuditAction } from '@/services/audit.service';
 import { tryDecryptLicenseCode } from '@/lib/crypto';
+import { normalizeChannelAccountId, normalizeChannel } from '@/lib/channelAccountKey';
 import { env } from '@/config/env';
 
 /** 时区标注（PRD §2.6） */
@@ -13,9 +14,22 @@ export class PortService {
    * 端口申请（P0-C-20 AC1/AC10）：
    * 事务内校验团队 HELD 数 < 端口配额 → 建 PortLease(status=HELD)；
    * 并发防超卖 = 事务内 count + SQLite 写串行化；
-   * 同 (clientId, channelAccountKey) 已有 HELD → 幂等返回已有 lease。
+   * 同 (clientId, 规范化账号标识) 已有 HELD → 幂等返回已有 lease。
+   *
+   * 幂等键用**规范化后的账号标识**而非原始 `channelAccountKey`：
+   * 客户端升级后由「传 portId」改为「传 channel + channelAccountId」时，
+   * 若仍按原始 key 比对会判不出同账号 → 重复占端口。
    */
-  async acquire(teamId: string, keyId: string, clientId: string, channelAccountKey: string) {
+  async acquire(
+    teamId: string,
+    keyId: string,
+    clientId: string,
+    channelAccountKey: string,
+    options?: { channelAccountId?: string; channel?: 'TELEGRAM' | 'WHATSAPP' },
+  ) {
+    const accountId = normalizeChannelAccountId(channelAccountKey, options?.channelAccountId);
+    const channel = normalizeChannel(options?.channel, channelAccountKey);
+
     return prisma.$transaction(async (tx) => {
       // 1. 校验团队状态与配额
       const team = await tx.team.findUnique({
@@ -30,10 +44,13 @@ export class PortService {
         throw AppError.forbidden('团队已到期', ErrorCode.TEAM_UNAVAILABLE);
       }
 
-      // 2. 幂等：同 (clientId, channelAccountKey) 已有 HELD → 直接返回
-      const existing = await tx.portLease.findFirst({
-        where: { clientId, channelAccountKey, status: 'HELD' },
+      // 2. 幂等：同 (clientId, 规范化账号标识) 已有 HELD → 直接返回
+      const clientHeld = await tx.portLease.findMany({
+        where: { clientId, status: 'HELD' },
       });
+      const existing = clientHeld.find(
+        (l) => normalizeChannelAccountId(l.channelAccountKey, l.channelAccountId) === accountId,
+      );
       if (existing) {
         return {
           leaseId: existing.id,
@@ -41,6 +58,10 @@ export class PortService {
           keyId: existing.keyId,
           clientId: existing.clientId,
           channelAccountKey: existing.channelAccountKey,
+          channelAccountId: normalizeChannelAccountId(
+            existing.channelAccountKey,
+            existing.channelAccountId,
+          ),
           status: existing.status,
           acquiredAt: existing.acquiredAt.toISOString(),
           lastSeenAt: existing.lastSeenAt.toISOString(),
@@ -68,9 +89,38 @@ export class PortService {
           keyId,
           clientId,
           channelAccountKey,
+          channelAccountId: accountId,
           status: 'HELD',
         },
       });
+
+      // 5. 顺带补登渠道账号（若客户端尚未走 /accounts 对账，保证主管端立刻可见）
+      if (channel) {
+        const registered = await tx.channelAccount.findUnique({
+          where: { clientId_channelAccountId: { clientId, channelAccountId: accountId } },
+        });
+        if (registered) {
+          if (registered.deletedAt !== null) {
+            // 客户端已删除该账号却仍在申请端口 → 以启动动作为准，复位登记
+            await tx.channelAccount.update({
+              where: { id: registered.id },
+              data: { deletedAt: null, channel },
+            });
+          }
+        } else {
+          await tx.channelAccount.create({
+            data: {
+              teamId,
+              keyId,
+              clientId,
+              channelAccountId: accountId,
+              channel,
+              // 无别名来源，退化为标识本身；客户端下次对账会覆盖为真实别名
+              accountName: accountId,
+            },
+          });
+        }
+      }
 
       return {
         leaseId: lease.id,
@@ -78,6 +128,7 @@ export class PortService {
         keyId: lease.keyId,
         clientId: lease.clientId,
         channelAccountKey: lease.channelAccountKey,
+        channelAccountId: accountId,
         status: lease.status,
         acquiredAt: lease.acquiredAt.toISOString(),
         lastSeenAt: lease.lastSeenAt.toISOString(),
@@ -90,13 +141,16 @@ export class PortService {
   /**
    * 心跳协议（P0-C-20 AC2/AC8/AC12）：
    * ① 刷新各 lease lastSeenAt；
-   * ② 比对服务端记录，返回 revokedLeaseIds（已回收/已撤销/配额下调需关闭的占用）；
-   * ③ 返回 overQuota 信息（配额下调后 held > quota 时触发）。
+   * ② 刷新本 clientId 的 ClientCredential.lastActiveAt（设备级保活，主管端设备在线判据）；
+   * ③ 写入客户端上报的渠道业务状态 channelStatus（仅本人名下、仍 HELD 的租约）；
+   * ④ 比对服务端记录，返回 revokedLeaseIds（已回收/已撤销/配额下调需关闭的占用）；
+   * ⑤ 返回 overQuota 信息（配额下调后 held > quota 时触发）。
    */
   async heartbeat(
     teamId: string,
     clientId: string,
     leaseIds: string[],
+    channelStatuses?: Array<{ leaseId: string; status: 'ONLINE' | 'WAITING_QR' | 'OFFLINE' }>,
   ) {
     const now = new Date();
 
@@ -126,6 +180,40 @@ export class PortService {
       });
     }
 
+    // ── 顺带做**设备级**保活（P0-C-20 AC2 心跳保活）──────────────────
+    // 主管端「设备管理」页的设备在线判据是 ClientCredential.lastActiveAt，
+    // 而刷新它的接口过去只有 /api/client/auth/renew —— access token 有效期 3 天，
+    // 客户端几乎不会主动续期，于是设备激活 5 分钟后必然被判「离线」（假离线）。
+    // 心跳是客户端唯一的周期性调用（默认 2 分钟 < 在线窗口 5 分钟），故在此一并刷新。
+    // 即使 leaseIds 为空（本机未占用任何端口）也刷新：设备在线与是否跑账号无关。
+    const deviceKeepAlive = await prisma.clientCredential.updateMany({
+      where: { clientId },
+      data: { lastActiveAt: now },
+    });
+
+    // 写入渠道业务状态（P0-C-03 AC4/AC8/AC9/AC10）：
+    // 按归属过滤 —— 只更新「本 clientId 名下 + 仍 HELD」的租约，防越权写他人租约
+    let channelStatusUpdated = 0;
+    if (channelStatuses && channelStatuses.length > 0) {
+      const ownedHeld = new Set(
+        leases.filter((l) => l.status === 'HELD' && l.clientId === clientId).map((l) => l.id),
+      );
+      const byStatus = new Map<string, string[]>();
+      for (const item of channelStatuses) {
+        if (!ownedHeld.has(item.leaseId)) continue;
+        const list = byStatus.get(item.status) ?? [];
+        list.push(item.leaseId);
+        byStatus.set(item.status, list);
+      }
+      for (const [status, ids] of byStatus) {
+        const res = await prisma.portLease.updateMany({
+          where: { id: { in: ids }, clientId, status: 'HELD' },
+          data: { channelStatus: status },
+        });
+        channelStatusUpdated += res.count;
+      }
+    }
+
     // 检测配额下调导致的 over-quota（P0-S-11 AC6/AC7）
     const team = await prisma.team.findUnique({
       where: { id: teamId },
@@ -151,6 +239,13 @@ export class PortService {
         leases.some((l) => l.id === id && l.clientId === clientId),
       ),
       revokedLeaseIds,
+      /** 本次写入 channelStatus 的租约数（未上报 channelStatuses 时恒为 0） */
+      channelStatusUpdated,
+      /**
+       * 设备活跃时间（本次心跳已刷新，主管端「设备管理」页据此显示在线）；
+       * 为 null 表示库中没有该 clientId 的凭据（已被撤销/删除）→ 客户端应重新激活。
+       */
+      deviceActiveAt: deviceKeepAlive.count > 0 ? now.toISOString() : null,
       overQuota,
       heldCount,
       portQuota: team!.portQuota,
@@ -361,7 +456,8 @@ export class PortService {
     const totalHeld = allLeases.length;
 
     const now = Date.now();
-    const offlineThresholdMs = 5 * 60 * 1000; // 5 分钟未上报视为离线
+    // 在线判定窗口：统一取 env.onlineWindowMs（默认 5 分钟），与 IM 账号页 / 客户端仪表板一致
+    const offlineThresholdMs = env.onlineWindowMs; // 超过窗口未上报视为离线
     const stuckThresholdMs = 60 * 60 * 1000; // 60 分钟未上报视为卡死
 
     const offlineLeases = allLeases.filter(
@@ -439,7 +535,7 @@ export class PortService {
    *
    * - 已占用/配额合计 = HELD / portQuota
    * - 可用端口 = portQuota - HELD（包括未启动账号）
-   * - 离线仍占用 = HELD 且 lastSeenAt 距今 > 5 分钟
+   * - 离线仍占用 = HELD 且 lastSeenAt 距今 > ONLINE_WINDOW（默认 5 分钟）
    * - 疑似卡死 = HELD 且 lastSeenAt 距今 > 60 分钟
    */
   async getTeamDashboard(teamId: string) {
@@ -458,7 +554,8 @@ export class PortService {
     });
 
     const now = Date.now();
-    const offlineThresholdMs = 5 * 60 * 1000;
+    // 在线判定窗口：统一取 env.onlineWindowMs（默认 5 分钟）
+    const offlineThresholdMs = env.onlineWindowMs;
     const stuckThresholdMs = 60 * 60 * 1000;
 
     // 离线仍占用：5 分钟未上报但尚不足 60 分钟（未达卡死阈值）

@@ -19,7 +19,10 @@ export const supervisorUsageRouter = Router();
  *   get:
  *     tags: [Usage]
  *     summary: IM 账号列表（P0-B-10 AC1）
- *     description: 本团队所有密钥下已添加的渠道账号及渠道、状态、所属密钥；空态展示。
+ *     description: >
+ *       本团队所有密钥下**已添加的**渠道账号及渠道、状态、所属密钥；空态展示。
+ *       数据源为 channel_accounts 登记表（主）+ 当前 HELD 端口租约（运行态），
+ *       因此「已添加但从未启动」的账号亦在列表中，状态为 NOT_STARTED。
  *     security:
  *       - bearerAuth: []
  *     responses:
@@ -27,36 +30,7 @@ export const supervisorUsageRouter = Router();
  *         description: 账号列表
  *         content:
  *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success: { type: boolean }
- *                 data:
- *                   type: object
- *                   properties:
- *                     items:
- *                       type: array
- *                       items:
- *                         type: object
- *                         properties:
- *                           leaseId: { type: string }
- *                           channel: { type: string, description: "telegram/whatsapp" }
- *                           accountId: { type: string }
- *                           channelAccountKey: { type: string }
- *                           status: { type: string, enum: [HELD, RELEASED] }
- *                           online: { type: boolean }
- *                           keyId: { type: string }
- *                           keyNickname: { type: string }
- *                           acquiredAt: { type: string, format: date-time }
- *                           lastSeenAt: { type: string, format: date-time }
- *                           releasedAt: { type: string, format: date-time, nullable: true }
- *                     summary:
- *                       type: object
- *                       properties:
- *                         online: { type: integer }
- *                         offline: { type: integer }
- *                         total: { type: integer }
- *                     timezone: { type: string }
+ *             schema: { $ref: '#/components/schemas/ImAccountsResponse' }
  *       401: { $ref: '#/components/responses/Unauthorized' }
  *       403: { $ref: '#/components/responses/Forbidden' }
  */

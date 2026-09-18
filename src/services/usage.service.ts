@@ -99,79 +99,9 @@ export class UsageService {
 
   // ── T5-04: 主管侧用量查询接口 ──
 
-  /**
-   * IM 账号列表（主管端 IM 账号页）：
-   * 团队下全部 HELD/RELEASED 端口租约 → 映射为 IM 账号列表（按 channelAccountKey 展示）。
-   * - 账号总数 = HELD + 未启动的 RELEASED
-   * - 在线 = status=HELD 且 channelStatus=ONLINE
-   * - 离线（仍占端口）= status=HELD 且 channelStatus=OFFLINE
-   * - 占用端口合计 = status=HELD 的数量
-   */
-  async listImAccounts(teamId: string) {
-    const leases = await prisma.portLease.findMany({
-      where: { teamId },
-      include: {
-        licenseKey: {
-          select: { id: true, nickname: true },
-        },
-      },
-      orderBy: [{ status: 'asc' }, { acquiredAt: 'desc' }],
-    });
-
-    const now = Date.now();
-
-    const items = leases.map((l) => {
-      const [channel, ...accountParts] = l.channelAccountKey.split(':');
-      const accountId = accountParts.join(':') || l.channelAccountKey;
-
-      // IM 账号业务状态：RELEASED 一律视为未启动；HELD 按 channelStatus 区分
-      let imStatus: 'ONLINE' | 'WAITING_QR' | 'OFFLINE' | 'RELEASED' | 'UNKNOWN';
-      if (l.status === 'RELEASED') imStatus = 'RELEASED';
-      else if (l.channelStatus === 'WAITING_QR') imStatus = 'WAITING_QR';
-      else if (l.channelStatus === 'ONLINE' || l.channelStatus === 'OFFLINE') {
-        imStatus = l.channelStatus;
-      } else {
-        const seenMs = now - new Date(l.lastSeenAt).getTime();
-        imStatus = seenMs <= 60 * 1000 ? 'ONLINE' : 'OFFLINE';
-      }
-
-      return {
-        leaseId: l.id,
-        accountId,
-        channelAccountKey: l.channelAccountKey,
-        channel: channel || 'unknown',
-        status: imStatus,
-        isHeld: l.status === 'HELD',
-        portsHeld: l.status === 'HELD' ? 1 : 0,
-        keyId: l.keyId,
-        keyNickname: l.licenseKey.nickname,
-        clientId: l.clientId,
-        acquiredAt: l.acquiredAt.toISOString(),
-        lastSeenAt: l.lastSeenAt.toISOString(),
-        releasedAt: l.releasedAt?.toISOString() ?? null,
-        proxyExit: l.proxyExit ?? '',
-        timezone: TIMEZONE,
-      };
-    });
-
-    const totalCount = items.length;
-    const heldCount = items.filter((i) => i.isHeld).length;
-    const onlineCount = items.filter((i) => i.status === 'ONLINE').length;
-    const offlineHeldCount = items.filter((i) => i.status === 'OFFLINE').length;
-    const waitingQrCount = items.filter((i) => i.status === 'WAITING_QR').length;
-
-    return {
-      items,
-      summary: {
-        total: totalCount,
-        online: onlineCount,
-        offlineHeld: offlineHeldCount,
-        waitingQr: waitingQrCount,
-        portsHeld: heldCount,
-      },
-      timezone: TIMEZONE,
-    };
-  }
+  // 注：IM 账号列表（原 listImAccounts）已迁移至 channelAccountService.listTeamAccounts ——
+  // 数据源由 port_leases 反推改为 channel_accounts 登记表，见 channel-account-design.md。
+  // 本服务只保留翻译用量相关查询。
 
   /**
    * 翻译用量汇总（P0-B-10 AC4/AC8 / P1-B-16）：

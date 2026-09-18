@@ -61,7 +61,9 @@ clientRouter.post(
  *       客户端在 access token 剩余有效期 ≤ 1/3 时用 refresh token 换取新凭据；
  *       校验 refresh 哈希 → 密钥/团队状态 → 指纹 → 原子轮换；
  *       旧 access jti 进入 60s 宽限期（保护在途请求），宽限期后旧凭据 401；
- *       refresh token 每次续期滑动重置（24h）。
+ *       refresh token 每次续期滑动重置（默认 REFRESH_TOKEN_TTL=14 天）。
+ *       续期会同时刷新设备活跃时间，但 **不要** 用高频续期来做设备保活
+ *       （每次续期都旋转 refresh token）—— 设备保活请用 POST /api/client/ports/heartbeat。
  *     security:
  *       - bearerAuth: []
  *     parameters:

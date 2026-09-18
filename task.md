@@ -405,6 +405,7 @@ M0 工程基础
 - **依赖**：T5-01
 - **开发内容**：`GET /api/supervisor/accounts`（IM 账号）、`GET /api/supervisor/ports`（端口用量）、`GET /api/supervisor/translation-usage`（翻译用量）、按密钥用量分布（P1）；接口不可用时返回加载失败而非 0（AC13）。
 - **验收要点**：数据实时、服务端记录为准；团队范围权限校验（AC14）。
+- **增补（2026-09-17）**：IM 账号列表数据源由 `port_leases` 反推改为 **`channel_accounts` 登记表**（主）+ 当前 HELD 租约（运行态），配套新增 **渠道账号登记表 + 客户端全量对账接口 `PUT /api/client/accounts`**，使「已添加但从未启动」的账号也可见（P0-B-10 AC1）；账号状态枚举定为 `NOT_STARTED / WAITING_QR / ONLINE / OFFLINE`（去掉误用的 `RELEASED`），并补齐 `online` 与 `summary.offline/notStarted`。详见 backend §6.3、`channel-account-design.md`。
 
 ---
 
@@ -439,6 +440,7 @@ M0 工程基础
 - **依赖**：T5-04
 - **开发内容**：本团队所有密钥下已添加的渠道账号及渠道、状态、所属密钥；空态展示。
 - **验收要点**：AC1、AC6 空态不报错。
+- **数据来源（2026-09-17 增补）**：`GET /api/supervisor/accounts` → `channel_accounts` 登记表（主）+ 当前 HELD 租约（运行态）。前端须按四项字段对齐（否则状态列恒显示「离线」、添加时间列对未启动账号为空）：状态列改用 `row.status` 四态渲染（含「未启动」）；「添加时间」改取 `row.createdAt`（`acquiredAt` 对未启动账号为 `null`）；统计卡改用 `summary.offline` / `summary.notStarted`。
 
 #### T6-05 端口用量页（含手动释放）
 

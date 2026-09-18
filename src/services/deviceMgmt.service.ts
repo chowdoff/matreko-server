@@ -1,9 +1,18 @@
 import { prisma } from '@/lib/prisma';
+import { env } from '@/config/env';
 
 /** 主管端设备管理视图（与原型"设备管理"页对齐） */
 
-/** 设备"在线"判定窗口：5 分钟内有续期/心跳视为在线 */
-const ONLINE_WINDOW_MS = 5 * 60 * 1000;
+/**
+ * 设备「在线」判据（P0-C-20 AC2 / P0-A-02）：
+ * - 优先取 `ClientCredential.lastActiveAt`（由客户端 POST /api/client/ports/heartbeat 刷新）；
+ * - 老客户端尚未实现心跳（lastActiveAt 为 null）→ 回落 `lastRenewedAt`（续期时间，现状行为）；
+ * - 从未取得凭据（未激活/已登出）→ 回落绑定时间，必然离线。
+ *
+ * 窗口统一取 `env.onlineWindowMs`（默认 5 分钟），与 IM 账号列表 / 端口管理 / 客户端仪表板同源。
+ * ⚠️ 历史缺陷：该窗口曾在此硬编码 5 分钟且判据只认续期时间——access token TTL 3 天，
+ * 客户端几乎不主动续期，导致设备激活 5 分钟后必然显示离线（假离线）。
+ */
 
 /** 序号形设备指纹（仅展示用途），从 fingerprintHash 派生 */
 function maskFingerprint(fingerprintHash: string): string {
@@ -54,12 +63,18 @@ export class SupervisorDeviceService {
       };
     }
 
-    // 2) 关联 ClientCredential（取 lastRenewedAt，作为在线判据）
+    // 2) 关联 ClientCredential（取设备活跃时间/续期时间，作为在线判据）
     const fingerprints = bindings.map((b) => b.fingerprintHash);
     const keyIds = Array.from(new Set(bindings.map((b) => b.keyId)));
     const credentials = await prisma.clientCredential.findMany({
       where: { keyId: { in: keyIds }, deviceFingerprintHash: { in: fingerprints } },
-      select: { keyId: true, deviceFingerprintHash: true, lastRenewedAt: true, clientId: true },
+      select: {
+        keyId: true,
+        deviceFingerprintHash: true,
+        lastActiveAt: true,
+        lastRenewedAt: true,
+        clientId: true,
+      },
     });
     const credMap = new Map<string, typeof credentials[number]>();
     for (const c of credentials) {
@@ -69,9 +84,15 @@ export class SupervisorDeviceService {
     // 3) 设备明细（推断 online/offline）
     const items = bindings.map((b) => {
       const cred = credMap.get(`${b.keyId}:${b.fingerprintHash}`);
-      const lastSeen = cred?.lastRenewedAt ?? b.boundAt;
+      // 判据优先级：心跳活跃时间 → 续期时间 → 绑定时间（见文件头说明）
+      const lastSeen = cred?.lastActiveAt ?? cred?.lastRenewedAt ?? b.boundAt;
+      const lastSeenSource: 'HEARTBEAT' | 'RENEW' | 'BINDING' = cred?.lastActiveAt
+        ? 'HEARTBEAT'
+        : cred?.lastRenewedAt
+          ? 'RENEW'
+          : 'BINDING';
       const isKeyDisabled = b.licenseKey.status === 'DISABLED';
-      const isOnline = !isKeyDisabled && lastSeen.getTime() >= now - ONLINE_WINDOW_MS;
+      const isOnline = !isKeyDisabled && lastSeen.getTime() >= now - env.onlineWindowMs;
       const relative = formatRelative(lastSeen, now);
 
       return {
@@ -86,6 +107,8 @@ export class SupervisorDeviceService {
         boundAt: b.boundAt.toISOString(),
         lastSeenAt: lastSeen.toISOString(),
         lastSeenRelative: relative,
+        /** 在线判据来源：HEARTBEAT=已实现心跳保活；RENEW=老客户端回落续期时间；BINDING=无凭据 */
+        lastSeenSource,
         status: isOnline ? 'ONLINE' : 'OFFLINE',
         keyDisabled: isKeyDisabled,
         canUnbind: true,
@@ -120,7 +143,8 @@ export class SupervisorDeviceService {
       items,
       summary: {
         teamId,
-        hint: '解绑会让它在 5 分钟内退出登录',
+        // 分钟数随在线窗口（env.onlineWindowMs）同步，避免文案与判据漂移
+        hint: `解绑会让它在 ${Math.ceil(env.onlineWindowMs / 60_000)} 分钟内退出登录`,
       },
     };
   }

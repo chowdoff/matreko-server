@@ -13,33 +13,36 @@
 @platformEmail = admin@platform.example
 @platformPassword = Admin12345
 # 主管邮箱与设备指纹，可按需修改（改后同步修改后面请求中的引用）
-@supervisorEmail = sup_lyq@matreko.local
+@supervisorEmail = sup_0917@matreko.local
 @fingerprintA = fp-test-mac-001
 @fingerprintB = fp-test-win-002
 
 # ── 以下为动态变量，执行到对应步骤后手动回填 ──
 # 填第1.1步响应的 data.token
-@platformToken = kSiqfAX17ZNdO25-Jl8vwClXYWkjiqWcSLs9OYHiTwc
+@platformToken = I-eQd1RSq-uZaRNvpLzf0f3xcJtlPVZBODRFnC0MH2Q
 # 填第2.1步响应的 data.supervisor.id
-@supervisorId = cmt6p5lz50005uos9vifwe750
+@supervisorId = cmu4z7fm00005uodjtxfrxyzn
 # 填第2.1步响应的 data.initialPassword（仅此一次返回，勿丢） 
-@supervisorPassword = NjLa8Hptr45T
+@supervisorPassword = NaIVybjqTfpg
 # 填第2.1步响应的 data.team.id
-@teamId = cmt6p5lz40003uos9h8o524i3
+@teamId = cmu4z7flz0003uodj89jq5ixs
 # 填第3.1步响应的 data.token
-@supervisorToken = hnNiJkJVa7wH9GgUJi7QBGQQrgNAHn3p89OolsKEO3E
+@supervisorToken = _EgITcr7YMJazMrFpRzoTh97GLwYeNtigB2s1FL6Kdk
 # 填第4.1步响应的 data.licenseKey.id
-@licenseKeyId = cmt6p7881000buos9i1zrlwmu
+@licenseKeyId = cmu4z8n1y000buodj6jci0n7u
 # 填第4.1步响应的 data.plaintextCode（仅此一次返回，勿丢）
-@licenseCode = MTRK-JR3T-W3JF-2ECW-BVZJ
+@licenseCode = MTRK-MO2L-3NWC-4TGA-4SJB
 # 填第5.1步响应的 data.accessToken
-@clientAccessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlfblZuYmpBZW53bWVMTjFEVUFjamRFZyIsImtleUlkIjoiY210NnA3ODgxMDAwYnVvczlpMXpybHdtdSIsImRldmljZUZpbmdlcnByaW50SGFzaCI6IjcxMDAzZTI4OGQ5YTY5MGJiNzcxN2IwM2Y4MzVlOWY0NTdiMDQxYTBlYzZlMjc4NzljYjJkZGZhNDAwZDRhNDUiLCJqdGkiOiItOHpDUGdzaEVSWnZrVm9WOVoyRUx3IiwidG9rZW5fdHlwZSI6ImNsaWVudCIsImlhdCI6MTc4NzU0MzczMiwiZXhwIjoxNzg3NTQ0NjMyfQ.RearOvlMMnaTFx9e5dnM2B4QQ9QLRETOi3yW5hq9pSE
+@clientAccessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbGlfNUk2N2Rwb3U0YmdMU2tZOS1mdThEZyIsImtleUlkIjoiY211NHo4bjF5MDAwYnVvZGo2amNpMG43dSIsImRldmljZUZpbmdlcnByaW50SGFzaCI6IjQyZTQ1NDc2ZmQzOTU1NzE1OTM5NjE3NjcwMjRjNDk3YWJiMTNjMDg2ZDYyZWZlNzgyZjc3YmY5YjhmNmIyNzIiLCJqdGkiOiJVeHlHMm5ZQmduUHBfby03TS1EZnhRIiwidG9rZW5fdHlwZSI6ImNsaWVudCIsImlhdCI6MTc4OTYxNjE4MiwiZXhwIjoxNzg5NjE3MDgyfQ.2tuB2AlF4ZIBmdHu1jx8zQXL7FTVpSh41dlv8u-NTBU
 # 填第5.1步响应的 data.refreshToken
-@clientRefreshToken = hpyh1Z3p1Vavsxmu4efP7AQN8T_cQvj2N5nCE1Z0OXs
+@clientRefreshToken = tYJDITxA6aWLoR-uxeYGFqNTXvFlaxOq_hBk4sdjmg4
 # 填第5.1步响应的 data.device.id
-@bindingAId = cmt6pdvqb000euos98w5l7u0n
+@bindingAId = cmu4z9nzt000euodjzbnid9v6
 # 填第7.2步响应的 data.device.id
 @bindingBId = 
+
+@clientId_1 = cli_5I67dpou4bgLSkY9-fu8Dg
+@clientId_2 = cli_oHv-kzv8diAI5pIRnKZM0g
 
 ### =====================================================================
 ### 阶段 0：健康检查（可选）
@@ -72,7 +75,7 @@ Authorization: Bearer {{platformToken}}
 Content-Type: application/json
 
 {
-  "name": "华东客服一组_0819",
+  "name": "华东客服一组_0917",
   "supervisorEmail": "{{supervisorEmail}}",
   "expiresAt": "2027-01-01T00:00:00+08:00",
   "portQuota": 10,

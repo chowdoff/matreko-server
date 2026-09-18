@@ -26,6 +26,10 @@ export class PortController {
           keyId,
           clientId,
           req.body.channelAccountKey,
+          {
+            channelAccountId: req.body.channelAccountId,
+            channel: req.body.channel,
+          },
         );
         ApiResponse.success(res, result);
       } catch (err) {
@@ -34,7 +38,7 @@ export class PortController {
     },
   ];
 
-  /** 心跳协议（P0-C-20 AC2/AC8/AC12） */
+  /** 心跳协议（P0-C-20 AC2/AC8/AC12 + P0-C-03 AC4/AC8/AC9/AC10 渠道状态上报） */
   heartbeat = [
     validate(heartbeatSchema),
     async (req: Request, res: Response, next: NextFunction) => {
@@ -42,7 +46,12 @@ export class PortController {
         const { keyId, clientId } = req.auth!;
         const status = await getKeyStatusWithCache(keyId);
         const teamId = status!.teamId;
-        const result = await portService.heartbeat(teamId, clientId, req.body.leaseIds);
+        const result = await portService.heartbeat(
+          teamId,
+          clientId,
+          req.body.leaseIds,
+          req.body.channelStatuses,
+        );
         ApiResponse.success(res, result);
       } catch (err) {
         next(err);

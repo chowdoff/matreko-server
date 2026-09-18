@@ -56,6 +56,16 @@ export const env = {
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL, 2 * 60 * 1000, 'HEARTBEAT_INTERVAL'),
   leaseTtlMs: toInt(process.env.LEASE_TTL, 24 * 60 * 60 * 1000, 'LEASE_TTL'),
   leaseScanIntervalMs: toInt(process.env.LEASE_SCAN_INTERVAL, 60 * 1000, 'LEASE_SCAN_INTERVAL'),
+  /**
+   * 在线判定窗口（毫秒），默认 5 分钟。
+   *
+   * 账号/端口「在线」的统一判定阈值：lastSeenAt 距今 ≤ 本窗口即视为在线。
+   * ⚠️ 必须 **显著大于** `heartbeatIntervalMs`（默认 2 分钟），否则健康账号会在两次心跳
+   * 之间被判离线（历史上 IM 账号页曾硬编码 60s，小于心跳周期，属缺陷）。
+   * PRD §6.1 承诺「服务端/客户端认知不一致 ≤ 5min」，故默认取 5 分钟。
+   * 三处消费方（IM 账号列表 / 端口管理 / 客户端仪表板）统一引用本值，避免同账号状态不一致。
+   */
+  onlineWindowMs: toInt(process.env.ONLINE_WINDOW, 5 * 60 * 1000, 'ONLINE_WINDOW'),
 
   // ── 翻译（backend §7.6） ──
   engineMaxChars: toInt(process.env.ENGINE_MAX_CHARS, 5000, 'ENGINE_MAX_CHARS'),

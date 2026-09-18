@@ -65,7 +65,7 @@ export async function renewClientCredential(input: RenewInput, ip?: string) {
     throw AppError.forbidden('团队已到期', ErrorCode.TEAM_UNAVAILABLE);
   }
 
-  // refresh 本身过期（滑动续期，24h）
+  // refresh 本身过期（滑动续期，默认 REFRESH_TOKEN_TTL=14 天，见 config/env.ts）
   if (credential.expiresAt.getTime() <= Date.now()) {
     throw AppError.unauthorized('凭据已过期，请重新激活', ErrorCode.AUTH_EXPIRED);
   }
@@ -112,6 +112,9 @@ export async function renewClientCredential(input: RenewInput, ip?: string) {
         refreshTokenHash: sha256(newRefreshToken),
         expiresAt: new Date(now + env.refreshTokenTtlMs),
         lastRenewedAt: new Date(now),
+        // 续期同时算一次设备活跃：凭据记录是「删除 + 重建」，若不带过去活跃时间，
+        // 「设备管理」页会在续期瞬间闪一次离线（lastActiveAt 变 null → 回落 lastRenewedAt）
+        lastActiveAt: new Date(now),
       },
     });
 

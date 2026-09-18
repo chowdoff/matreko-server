@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { usageService } from '@/services/usage.service';
+import { channelAccountService } from '@/services/channelAccount.service';
 import { ApiResponse } from '@/utils/ApiResponse';
 
 /** 时区标注 */
@@ -13,14 +14,17 @@ const TIMEZONE = 'Asia/Shanghai';
  */
 export class UsageController {
   /**
-   * IM 账号列表（P0-B-10 AC1）：本团队所有密钥下的渠道账号及状态。
+   * IM 账号列表（P0-B-10 AC1）：本团队所有密钥下**已添加的**渠道账号及状态。
    * GET /api/supervisor/accounts
+   *
+   * 数据源为 `channel_accounts` 登记表（主）+ 当前 HELD 租约（运行态），
+   * 因此「已添加但从未启动」的账号也会出现，状态为 NOT_STARTED。
    */
   imAccounts = async (req: Request, res: Response, next: NextFunction) => {
     try {
       const account = req.account!;
       const teamId = account.teamId!;
-      const result = await usageService.listImAccounts(teamId);
+      const result = await channelAccountService.listTeamAccounts(teamId);
       ApiResponse.success(res, result);
     } catch (err) {
       next(err);

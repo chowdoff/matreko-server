@@ -147,9 +147,10 @@ AuditLog / RevokedToken / BackofficeSession
 | clientId | String (unique) | 客户端实例标识（限流维度 key）；由 `(keyId, 设备指纹)` 确定性派生，同一设备恒定不变，见 §5.1.2 |
 | refreshTokenHash | String (unique) | refresh token 哈希 |
 | expiresAt | DateTime | 过期时刻（滑动续期） |
-| createdAt / lastRenewedAt | DateTime | 创建 / 最近续期 |
+| createdAt / lastRenewedAt | DateTime | 创建 / 最近续期（语义＝凭据轮换，**不是**在线心跳） |
+| lastActiveAt | DateTime? | 设备活跃时间（语义＝客户端心跳保活，由 `POST /api/client/ports/heartbeat` 刷新）；存量记录为 null 时在线判据回落 `lastRenewedAt`，见 §6.3 |
 
-**每个激活成功的设备 = 一条 ClientCredential**。refresh token 轮换时旧记录删除、新记录插入（旋转式）。
+**每个激活成功的设备 = 一条 ClientCredential**。refresh token 轮换时旧记录删除、新记录插入（旋转式）；重建时带上 `lastActiveAt`，避免续期瞬间被误判离线。
 
 #### PortLease 端口占用
 
@@ -159,13 +160,39 @@ AuditLog / RevokedToken / BackofficeSession
 | teamId | String | 所属团队（配额裁决维度） |
 | keyId | String | 持有客服 |
 | clientId | String | 持有客户端实例 |
-| channelAccountKey | String | 客户端侧账号唯一标识（`channel:accountId`，稳定标识） |
+| channelAccountKey | String | 客户端**原始上报值**（历史字段，可能为 `channel:accountId` 也可能为裸 id） |
+| channelAccountId | String? | **规范化**账号标识（与 `ChannelAccount.channelAccountId` 精确匹配；老客户端可能为 null） |
 | status | Enum (HELD / RELEASED) | 占用中 / 已释放 |
 | acquiredAt | DateTime | 占用时刻 |
 | lastSeenAt | DateTime | 最近一次在线证明时刻 |
 | releasedAt | DateTime? | 释放时刻 |
+| proxyExit | String? | 代理出口展示信息（仅展示用途） |
+| channelStatus | String? | 客户端上报的渠道业务状态（ONLINE / WAITING_QR / OFFLINE，仅展示用途） |
 
 **服务端记录为准**（PRD P0-C-20）。回收 = 置 `RELEASED`（不物理删除，保留审计）。
+索引 `(clientId, channelAccountId)`（与登记表匹配用）。
+
+#### ChannelAccount 渠道账号登记（P0-C-03 AC1 / P0-B-10 AC1）
+
+> **只登记存在性元数据**：渠道、别名、归属。代理 / 指纹 / 数据目录等**配置内容仍只存客户端本地**，不违反 P0-C-18 AC18「各设备账号配置互相独立、不做同步」。与 §3.3 B 是两张不同的表，请勿混淆（区别见 §3.3 末尾）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | String (cuid) | 主键 |
+| teamId | String | 所属团队（主管端过滤维度；服务端按 `req.auth.keyId` 反查写入，客户端不上传） |
+| keyId | String | 所属密钥（主管端「所属密钥」列） |
+| clientId | String | 归属客户端（= `ClientCredential.clientId`，按 `(keyId, 指纹)` 确定性派生，同设备恒定 §5.1.2） |
+| channelAccountId | String | 客户端侧稳定标识（客户端本地 `port.id`，**单机内唯一**） |
+| channel | Enum (TELEGRAM / WHATSAPP) | 渠道 |
+| accountName | String | 客服自定义别名（P0-C-18「账号名称」，≤ 64 字符） |
+| createdAt | DateTime | 账号**添加**时刻（主管端「添加时间」列） |
+| updatedAt | DateTime | 最近变更时刻 |
+| deletedAt | DateTime? | 软删除（P0-C-18 AC15 删除账号配置）；主管端默认不展示 |
+
+- 唯一约束 `(clientId, channelAccountId)`：AC18 明确多设备配置互相独立 → `channelAccountId` 只单机唯一，用 `(keyId, …)` 会在同密钥多开时误撞。
+- 用 `clientId` 而非指纹哈希：正因为 clientId 已确定性派生，登记记录不会因重新激活而"换主人"。
+- 删除为**软删**，客户端重新添加同一账号时复位 `deletedAt`（AC20「不重复追加」）。
+- 本表**不引入** `config_version` —— 该字段属"配置内容同步"契约（§3.3 B），本表是"存在性登记"，语义不同。
 
 #### TranslationKey 翻译 API Key（管理后台唯一持有）
 
@@ -286,6 +313,17 @@ AuditLog / RevokedToken / BackofficeSession
 1. 预留字段一律可空或有默认值，不得成为业务写入的前置条件；
 2. `stable_message_id` 必须是「任意时刻、任意次识别同一条渠道消息都得到相同值」的确定性标识——它是未来同步的主键，也是防重复计费的基础（PRD P0-M-05 消息标识条款；客户端工程实现见 §9.2）；
 3. 未来同步上线时，云端模型直接按本契约建表，客户端历史数据按字段一一映射，**零迁移、零丢弃**。
+
+**与 `ChannelAccount` 登记表的区别（2026-09-17 增补，务必区分）**
+
+| | §3.3 B「账号配置（本地账号配置库）」 | §3.2「ChannelAccount 登记表」 |
+|---|---|---|
+| 定位 | 客户端**本地**库字段契约 | 服务端**登记**表 |
+| 存什么 | `proxy_config` / `fingerprint_config` / `data_dir` + 同步预留字段 | 仅 `channel` / `accountName` / 归属 |
+| v1.0 | 只写默认值，**不参与业务逻辑** | **参与业务**（主管端账号列表的唯一数据源） |
+| 未来 | 同步上线时按该契约建云端表（**另一张表**，非本表扩列） | 不变 |
+
+> PRD 未要求同步代理 / 指纹，且 P0-C-18 AC18 明确"不做同步"。登记表不触碰本节的配置同步契约，只补上 PRD 已要求、但此前实现缺失的"账号**存在性**"这一层。
 
 ---
 
@@ -530,6 +568,72 @@ clientId = "cli_" + base64url( HMAC-SHA256(CLIENT_ID_SECRET,
 - 管理员下调端口配额到低于当前占用（P0-S-11 AC6）：客户端端口占用页/心跳响应中携带「新配额」；客户端弹窗由客服选择关闭账号，**不强制关闭**（AC7 拒绝启动新账号直至满足配额）；
 - 配额变更写进程内缓存并主动失效，1 分钟内全端生效（P0-B-10 AC5）。
 
+### 6.3 渠道账号登记与对账（P0-C-03 AC1 / P0-C-18 / P0-B-10 AC1，2026-09-17 增补）
+
+**问题背景**：主管端 `GET /api/supervisor/accounts` 原先用 `port_leases` 反推账号列表，而端口租约**只在账号启动时产生**——于是"已添加但从未启动"的账号在服务端完全不存在，违反 P0-B-10 AC1「已**添加**的渠道账号」。措辞口径已统一为 **AC1 的"已添加"**（用户故事中的"已启动"为笔误）。
+
+**概念边界**：
+
+| 概念 | 语义 | 载体 | 生命周期 |
+|---|---|---|---|
+| **渠道账号** | 客服配置的一个 IM 账号（渠道 + 别名 + 代理 + 指纹 + 数据目录） | 客户端本地 `port` 表（真相源）<br>+ 服务端 `channel_accounts`（仅登记） | 添加即存在 → 直到删除 |
+| **端口租约** | 账号**启动后**对团队端口的占用凭证 | 服务端 `port_leases` | 启动（acquire）→ 停止 / 超时回收（RELEASED） |
+| **账号状态** | 账号当前跑没跑 | **派生值**（租约 + `channelStatus` 计算，不落库） | — |
+
+**账号状态派生（四态，取代此前误用的 `RELEASED`）**：
+
+| 状态 | 判定 |
+|---|---|
+| `NOT_STARTED` | 无 HELD 租约（不占端口） |
+| `WAITING_QR` | HELD + `channelStatus = WAITING_QR` |
+| `ONLINE` | HELD + `channelStatus = ONLINE`；或 `channelStatus` 缺失但 `lastSeenAt` 在在线窗口内 |
+| `OFFLINE` | HELD + 其余情况（离线但**仍占端口**） |
+
+**主管端数据源**：`channel_accounts`（主，`deletedAt IS NULL`）LEFT JOIN 当前 HELD 租约（运行态），按 `(clientId, channelAccountId)` 匹配。
+
+**在线判定窗口统一（顺带修复）**：新增 `ONLINE_WINDOW`（默认 5 分钟），作为三处消费方（IM 账号列表 / 端口管理 / 客户端仪表板）的**唯一**在线阈值。
+
+> 修复前 IM 账号页硬编码 **60 秒**，小于心跳间隔 2 分钟 → 健康账号在两次心跳之间**必然**被判离线；且同一账号在端口管理页（5 分钟）与 IM 账号页（60 秒）会显示不同状态。现统一为 `env.onlineWindowMs`。
+
+**写入路径（三条，殊途同归）**：
+
+| 路径 | 接口 | 说明 |
+|---|---|---|
+| ① 全量对账（主） | `PUT /api/client/accounts` | 客户端提交本机全部未删除账号快照；服务端事务内 upsert + 软删；幂等可重放，漏报自愈 |
+| ② 启动补登（过渡兜底） | `POST /api/client/ports/acquire` | 客户端尚未接入①时，启动动作即登记（别名退化为标识本身，待①覆盖） |
+| ③ 历史回填（一次性） | `scripts/backfill-channel-accounts.ts` | 从存量 `port_leases` 提取账号，幂等；渠道不可判定者跳过并打印清单 |
+
+**心跳上报渠道状态（P0-C-03 AC4/AC8/AC9/AC10）**：`POST /api/client/ports/heartbeat` 的入参新增**可选** `channelStatuses: [{ leaseId, status }]`，服务端只更新「本 `clientId` 名下 + 仍 HELD」的租约（防越权写他人租约）。老客户端不传 → 行为与改造前完全一致。
+
+**心跳顺带做设备级保活（假离线修复）**：`ClientCredential.lastRenewedAt`（凭据轮换）过去被同时当作「设备在线」判据，而 access token TTL 3 天、客户端极少主动续期 → 设备激活 5 分钟后**必然**被判离线（假离线）。现把两个语义拆开：
+
+| 判据 | 字段 | 写入点 |
+|---|---|---|
+| 凭据轮换 | `lastRenewedAt` | 激活 / `POST /api/client/auth/renew` |
+| 设备活跃 | `lastActiveAt` | 激活 + `POST /api/client/ports/heartbeat`（每次心跳都刷新，**与是否占用端口无关**） |
+
+- 设备在线 = `lastActiveAt ?? lastRenewedAt ?? boundAt` 距今 ≤ `ONLINE_WINDOW`；设备管理页的窗口同步改为引用 `env.onlineWindowMs`（此前硬编码 5 分钟，属漏网的第四处消费方）；
+- 心跳响应新增 `deviceActiveAt`（本次设备保活时间）。**凭据已失效时请求会先在 `clientAuth` 中间件返回 `401 CREDENTIAL_REVOKED`**，客户端据此重新激活；`deviceActiveAt=null` 仅为「鉴权通过但库中无该 `clientId` 凭据」的防御性兜底分支，正常不可达；
+- 设备管理页响应项新增 `lastSeenSource`（`HEARTBEAT` / `RENEW` / `BINDING`），用于确认客户端心跳是否真的生效；
+- 向后兼容：老客户端 `lastActiveAt` 为 null → 回落续期时间，行为与改造前一致；仅新增响应字段，不改既有字段。
+
+> 客户端侧实施契约见 `client-keepalive-contract.md`（心跳 2 分钟、账号全量对账、acquire 补传字段）。
+
+> ⚠️ 残留风险：IM 账号页与端口管理页在 `channelStatus = 'ONLINE'` 时**不叠加** `lastSeenAt` 窗口判断。
+> 若客户端上报一次 ONLINE 后停止心跳，账号会一直显示在线（反向失真）。心跳接入后该状态由客户端持续刷新，
+> 但如需强一致，可后续把 ONLINE 分支也加上窗口判断。
+
+**`channelAccountKey` 规范化的权威规则**（实现见 `src/lib/channelAccountKey.ts`，全项目唯一实现）：
+
+```
+账号标识 = 显式传入 channelAccountId → 否则 key 含 ':' 取冒号后段 → 否则整个 key
+渠道     = 显式传入 channel     → 否则 key 冒号前缀为 telegram/whatsapp（大小写不敏感）→ 否则 null（不猜测）
+```
+
+`acquire` 的幂等键由「原始 `channelAccountKey`」改为「**规范化账号标识**」——客户端升级后由"传 portId"改为"传 channel + channelAccountId"时，若仍按原始 key 比对会判不出同账号 → 重复占端口。
+
+**上线顺序**：① 后端发布 → ② 执行回填脚本 → ③ 客户端接入对账接口。①与②之间主管端账号列表会短暂为空，故把回填放进发布流程以把窗口期压到秒级。存量设备的 `accountName` 回填为标识形态，客户端接入后由对账覆盖为真实别名。
+
 ---
 
 ## 7. 翻译代理与引擎管理（P0-S-12 / P0-T-07 定稿）
@@ -660,10 +764,11 @@ PRD 将 OQ-48 定为**产品决策**（「额度用完那一刻是所有 Key 一
 | POST | `/api/client/activate` | 密钥激活（绑定指纹） |
 | POST | `/api/client/auth/renew` | 凭据续期（无缝轮换） |
 | POST | `/api/client/auth/logout` | 主动登出（撤销本机凭据） |
-| POST | `/api/client/ports/acquire` | 申请端口 |
-| POST | `/api/client/ports/heartbeat` | 在线证明 + 撤销感知 |
+| POST | `/api/client/ports/acquire` | 申请端口（`channelAccountId` / `channel` 为可选扩展字段，见 §6.3） |
+| POST | `/api/client/ports/heartbeat` | 在线证明 + 撤销感知（可选带上报 `channelStatuses`，见 §6.3） |
 | POST | `/api/client/ports/release` | 释放单个端口 |
 | POST | `/api/client/ports/reset` | 本机占用归零（重启上报） |
+| PUT | `/api/client/accounts` | **渠道账号全量对账**（2026-09-17 增补，见 §6.3）：提交本机全部未删除账号快照，服务端事务内 upsert + 软删；幂等可重放 |
 | POST | `/api/client/translate` | 翻译代理 |
 | GET | `/api/client/team/usage` | 团队端口 / 翻译配额余量（团队级汇总，PRD §4.1 例外 / P0-B-10 AC19） |
 | GET | `/api/client/me` | 当前密钥所属团队信息 |
@@ -773,6 +878,7 @@ platform:  teams CRUD(无删除)  /teams/:id/disable  /teams/:id/quotas
 | `HEARTBEAT_INTERVAL` | 2 分钟 | P0-C-20 5 分钟感知 |
 | `LEASE_TTL` | 24 小时 | P0-C-20 24 小时回收 |
 | `LEASE_SCAN_INTERVAL` | 1 分钟 | 同上 |
+| `ONLINE_WINDOW` | 5 分钟 | 账号/端口「在线」判定窗口（§6.3）；**必须显著大于 `HEARTBEAT_INTERVAL`**，否则健康账号会在两次心跳之间被判离线 |
 | `ENGINE_MAX_CHARS` | 5000 | 超长消息（P0-T-07 AC10） |
 | `CHUNK_SIZE` | 4500 | 分片 |
 | `LANG_SYNC_CRON` | `0 4 * * *` | 语种清单同步 |
@@ -798,6 +904,15 @@ platform:  teams CRUD(无删除)  /teams/:id/disable  /teams/:id/quotas
 | 并发激活不超卖 | §5.3 行锁 + 唯一约束 | 测试：并发抢占最后一名额 |
 | 同设备重复激活身份稳定 | §5.1.2 clientId 稳定派生 | 测试：同 `code` + 同指纹激活两次，断言两次 `clientId` 完全相等（含解绑后重新激活） |
 | 端口防超卖 | §6.1 acquire 事务 | 测试：并发申请至配额上限 |
+| **已添加的渠道账号可见**（P0-B-10 AC1） | §6.3 `channel_accounts` + `PUT /api/client/accounts` | 测试：添加 3 个账号（1 启动 + 2 从未启动）→ 主管端 `total=3`、`notStarted=2`，未启动账号 `status=NOT_STARTED` / `leaseId=null` |
+| 账号配置可删除且不重复追加（P0-C-18 AC15/AC20） | §6.3 快照对账 + 软删复位 | 测试：快照移除后 `deleted=1`；重新添加后 `updated=1`、库中仍只有 1 行 |
+| 对账幂等 | §6.3 事务内 diff | 测试：重复提交同一快照 → `created=updated=deleted=0` |
+| 在线判定不误判 | §6.3 `ONLINE_WINDOW` 统一 | 测试：`lastSeenAt` 置 3 分钟前仍判 `ONLINE`（旧实现 60s 会误判 `OFFLINE`） |
+| 渠道状态越权防护 | §6.3 心跳归属校验 | 测试：设备 B 上报设备 A 的 leaseId → `channelStatusUpdated=0` 且 A 的状态未被篡改 |
+| 设备不再假离线 | §6.3 心跳保活 `lastActiveAt` | 测试：激活后把 `lastActiveAt` 置 6 分钟前 → 设备管理页判 `OFFLINE`；再调一次心跳 → 立即恢复 `ONLINE` 且 `lastSeenSource=HEARTBEAT` |
+| 无端口也能保活 | §6.3 心跳与占用解耦 | 测试：`leaseIds=[]` 调心跳 → `deviceActiveAt` 非空、`refreshedLeaseIds=[]` |
+| 凭据失效可感知 | §6.3 心跳鉴权 | 测试：删除该 `clientId` 的凭据后调心跳 → `401` 且 `code=CREDENTIAL_REVOKED`（客户端据此重新激活） |
+| 老客户端兼容 | §6.3 判据回落 | 测试：`lastActiveAt=null` 的设备，判据回落 `lastRenewedAt`，行为与改造前一致 |
 
 ---
 
